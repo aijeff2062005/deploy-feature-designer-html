@@ -19,10 +19,13 @@ async function failure(response: Response): Promise<Error> {
     const problem = (await response
         .json()
         .catch(() => ({ detail: response.statusText }))) as {
-        detail?: string | { loc?: (string | number)[]; msg?: string }[] | { message?: string };
+        detail?: string | { loc?: (string | number)[]; msg?: string }[] | { code?: string; message?: string };
         title?: string;
     };
     const detail = problem.detail;
+    if (!Array.isArray(detail) && typeof detail === "object" && detail?.code === "HULY_RESPONSE_UNVERIFIED") {
+        return new Error("Huly chưa trả mã task nên Agent Designer chưa xác minh được kết quả. Lệnh tạo có thể đã được gửi; hãy kiểm tra project Huly trước khi thử lại để tránh tạo trùng.");
+    }
     const message = Array.isArray(detail)
         ? detail
               .map(
@@ -147,8 +150,8 @@ export const api = {
         text(
             `/sessions/${sessionId}/screens/${screenId}/document${version ? `?version=${version}` : ""}`,
         ),
-    screenshotUrl: (sessionId: string, screenId: string, state?: string) =>
-        `${API_BASE}/sessions/${sessionId}/screens/${screenId}/screenshot?format=png${state ? `&state=${encodeURIComponent(state)}` : ""}`,
+    screenshotUrl: (sessionId: string, screenId: string, state?: string, width?: number) =>
+        `${API_BASE}/sessions/${sessionId}/screens/${screenId}/screenshot?format=png${state ? `&state=${encodeURIComponent(state)}` : ""}${width ? `&width=${width}` : ""}`,
     /** ``layout`` arranges the .fig: one page with a row per screen, or a page per screen. */
     exportUrl: (sessionId: string, format: "fig" | "zip", layout: "rows" | "pages" = "rows") =>
         `${API_BASE}/sessions/${sessionId}/export?format=${format}&layout=${layout}`,
@@ -179,6 +182,14 @@ export const api = {
 
     eventUrl: (runId: string) => `${API_BASE}/runs/${runId}/events`,
     eventHistory: (runId: string) => request<import("./types").WorkflowEvent[]>(`/runs/${runId}/event-history`),
+    hulyProjects: () => request<import("./types").HulyProjectsResponse>("/huly/projects"),
+    createHulyIssue: (sessionId: string, draft: import("./types").HulyIssueDraft) =>
+        request<import("./types").HulyIssueResult>(`/sessions/${sessionId}/huly/issues`, {
+            method: "POST",
+            body: JSON.stringify(draft),
+        }),
+    hulyAttachmentPreview: (sessionId: string, runId: string) =>
+        request<import("./types").HulyAttachmentPreview>(`/sessions/${sessionId}/huly/preview?run_id=${encodeURIComponent(runId)}`),
 };
 
 /** URL of the design page (canvas) for a session; one browser tab per session. */

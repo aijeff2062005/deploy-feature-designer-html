@@ -4,13 +4,17 @@ import binascii
 import json
 import re
 import struct
+from string import Template
+import tempfile
 import unicodedata
 from pathlib import Path
 from typing import Any, Annotated
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, Query, Request, status
+from platform_core.artifacts import get as get_platform_artifact
 from platform_core.fastapi import auth_disabled, require_project
+from platform_core.storage import get_storage
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -18,7 +22,10 @@ from ..attachments.parser import parse_bpmn_document, parse_json_document, parse
 from ..storage.assets import save_asset
 from ..core.errors import AppError, not_found
 from ..core.llm import STRUCTURED_PARSER_VERSION
+from ..designsystem.service import design_context
+from ..huly import client as huly_client
 from ..models import ExactAsset, Platform, ReviewCreate, RunCreate, RunView, SessionCreate, SessionView
+from ..render.assets import inline_assets
 from .access import DESIGNER_ROLE, current_user_id, current_username
 
 router = APIRouter(prefix="/api/v1")
@@ -31,6 +38,16 @@ class MessageCreate(BaseModel):
     style_hint: str | None = None
     library_ids: list[str] = Field(default_factory=list)
     assets: list[ExactAsset] = Field(default_factory=list, max_length=4)
+
+
+class HulyIssueCreate(BaseModel):
+    run_id: UUID
+    project_id: str = Field(min_length=1, max_length=160)
+    title: str = Field(min_length=1, max_length=240)
+    objective: str = Field(min_length=1, max_length=8_000)
+    current_state: str = Field(min_length=1, max_length=8_000)
+    solution: str = Field(min_length=1, max_length=12_000)
+    acceptance_criteria: str = Field(min_length=1, max_length=12_000)
 
 
 class AttachmentParseRequest(BaseModel):
@@ -112,6 +129,423 @@ async def health(request: Request) -> dict[str, object]:
         "structuredParser": STRUCTURED_PARSER_VERSION,
         "apiVersion": "v1",
     }
+
+
+@router.get("/huly/projects")
+async def list_huly_projects(request: Request) -> dict[str, Any]:
+    settings = request.app.state.settings
+    projects = await huly_client.list_projects(settings)
+    return {"projects": projects, "default_project_id": settings.huly_project}
+
+
+def _read_ba_package(session: Any) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Load the exact BA package version recorded when this Designer session was handed off."""
+    artifact_id = getattr(session, "source_artifact_id", None)
+    if not artifact_id:
+        return None, None
+    artifact = get_platform_artifact(artifact_id)
+    if not artifact or artifact.get("kind") != "ba_package" or not artifact.get("storage_key"):
+        return None, artifact
+    raw = get_storage().get(artifact["storage_key"])
+    try:
+        package = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+        return None, artifact
+    return (package if isinstance(package, dict) else None), artifact
+
+
+def _task_draft_from_sources(session: Any, run: Any, screens: list[Any], package: dict[str, Any] | None, artifact: dict[str, Any] | None) -> dict[str, Any]:
+    template_path = Path(__file__).resolve().parents[1] / "huly" / "task_draft_templates.json"
+    templates = json.loads(template_path.read_text(encoding="utf-8"))
+    fallback = templates["fallbacks"]
+
+    def render(template: str, values: dict[str, Any]) -> str:
+        return Template(template).safe_substitute(values).strip()
+
+    def fallback_text(key: str) -> str:
+        return str(fallback.get(key, ""))
+
+    def join_or(values: list[str], key: str) -> str:
+        return ", ".join(value for value in values if value) or fallback_text(key)
+
+    payload = package.get("payload", {}) if isinstance(package, dict) else {}
+    payload = payload if isinstance(payload, dict) else {}
+    artifacts = payload.get("artifacts", {}) if isinstance(payload.get("artifacts"), dict) else {}
+    feature = artifacts.get("feature_definition", {}) if isinstance(artifacts.get("feature_definition"), dict) else {}
+    business_rules = [item for item in artifacts.get("business_rules", []) if isinstance(item, dict)]
+    use_cases = [item for item in artifacts.get("use_cases", []) if isinstance(item, dict)]
+    workflow = artifacts.get("bpmn_reference", {}) if isinstance(artifacts.get("bpmn_reference"), dict) else {}
+    touchpoints = [item for item in artifacts.get("ui_touchpoints", []) if isinstance(item, dict)]
+    exceptions = [item for item in workflow.get("exceptions", []) if isinstance(item, dict)]
+    feature_id = str((package or {}).get("feature_id") or getattr(session, "source_ref", "") or "").strip()
+    feature_title = str(payload.get("feature_title") or session.title).strip()
+    goal = str(feature.get("goal") or payload.get("feature_description") or "").strip()
+    rule_ids = [str(item.get("id", "")).strip() for item in business_rules if str(item.get("id", "")).strip()]
+    use_case_ids = [str(item.get("id", "")).strip() for item in use_cases if str(item.get("id", "")).strip()]
+    platform_names = {str(screen.platform).casefold() for screen in screens}
+    platform_key = "mobile" if platform_names == {"mobile"} else "desktop" if platform_names == {"desktop"} else "responsive"
+    platform = templates["platform_labels"][platform_key]
+    title_values = {"platform": platform, "feature_title": feature_title, "screen_count": len(screens)}
+    title = render(templates["title"], title_values)
+    title_limit = int(templates.get("title_max_length", len(title)))
+    if len(title) > title_limit:
+        prefix = render(templates["title_prefix"], title_values)
+        suffix = render(templates["title_suffix"], title_values)
+        title = prefix + feature_title[:max(0, title_limit - len(prefix) - len(suffix))].rstrip() + suffix
+
+    objective_values = {
+        "goal": goal or fallback_text("goal"),
+        "screen_scope": render(templates["screen_scope"], {"screen_count": len(screens), "platform": platform}),
+    }
+    objective = "\n".join(render(item, objective_values) for item in templates["objective"])
+
+    completed = fallback_text("completed")
+    if package:
+        completed = render(templates["source_summary"], {
+            "rule_count": len(business_rules),
+            "step_count": len(workflow.get("steps", [])),
+            "exception_count": len(exceptions),
+            "use_case_count": len(use_cases),
+        })
+    gap = render(templates["implementation_gap"], {
+        "screen_count": len(screens),
+        "screen_names": ", ".join(screen.name for screen in screens) or fallback_text("gap"),
+    }) if screens else fallback_text("gap")
+    current_state = "\n".join(
+        render(item, {"completed": completed, "gap": gap})
+        for item in templates["current_state"]
+    )
+
+    use_case_rules = {
+        str(case.get("id")): [str(value) for value in case.get("rule_ids", []) if value]
+        for case in use_cases
+    }
+    rule_descriptions = {
+        str(item.get("id")): str(item.get("statement") or "").strip()
+        for item in business_rules
+        if item.get("id") and item.get("statement")
+    }
+    touchpoint_map = {str(item.get("id", "")).casefold(): item for item in touchpoints if item.get("id")}
+    run_spec = run.specification if isinstance(run.specification, dict) else {}
+    spec_screens = run_spec.get("screens", []) if isinstance(run_spec.get("screens"), list) else []
+    specs_by_id = {str(item.get("id")): item for item in spec_screens if isinstance(item, dict)}
+    screen_details: list[str] = []
+    for screen in screens:
+        spec = specs_by_id.get(str(screen.id), {})
+        source_ids = [str(value) for value in spec.get("source_ui_ids", []) if value]
+        related_use_cases: set[str] = set()
+        for source_id in source_ids:
+            touchpoint = touchpoint_map.get(source_id.casefold())
+            if touchpoint:
+                related_use_cases.update(str(value) for value in touchpoint.get("related_uc_ids", []) if value)
+        mapped_rules = sorted({
+            rule_descriptions[rule_id]
+            for use_case_id in related_use_cases
+            for rule_id in use_case_rules.get(use_case_id, [])
+            if rule_descriptions.get(rule_id)
+        })
+        screen_details.append(render(templates["screen_detail"], {
+            "name": screen.name,
+            "sections": ", ".join(str(value) for value in spec.get("sections", []) if value) or fallback_text("unknown"),
+            "states": ", ".join(str(value) for value in spec.get("states", []) if value) or fallback_text("unknown"),
+            "rules": "; ".join(mapped_rules) or fallback_text("unknown"),
+        }))
+
+    solution_values = {
+        "screen_count": len(screens),
+        "screen_details": "\n".join(screen_details) or fallback_text("gap"),
+        "business_rules": render(templates["business_rule_detail"], {
+            "items": "; ".join(str(item.get("statement") or "").strip() for item in business_rules if str(item.get("statement") or "").strip()) or fallback_text("business_rules")
+        }),
+        "exception_flows": "\n".join(
+            render(templates["exception_detail"], {
+                "condition": str(item.get("condition") or fallback_text("unknown")),
+                "handling": str(item.get("handling") or fallback_text("unknown")),
+                "outcome": render(templates["exception_outcome_suffix"], {"value": item.get("outcome")}) if item.get("outcome") else "",
+            }) for item in exceptions
+        ) or fallback_text("exception_flows"),
+        "scope_out": render(templates["scope_out_line"], {"items": join_or(
+            [str(item) for item in feature.get("scope_out", []) if item] if isinstance(feature.get("scope_out"), list) else [],
+            "scope_out",
+        )}),
+    }
+    solution = "\n".join(render(item, solution_values) for item in templates["solution"])
+
+    criteria: list[str] = []
+    for case in use_cases:
+        for item in case.get("acceptance_criteria", []) if isinstance(case.get("acceptance_criteria"), list) else []:
+            if isinstance(item, dict):
+                criteria.append(render(templates["use_case_acceptance"], {
+                    "given": item.get("given") or fallback_text("unknown"),
+                    "when": item.get("when") or fallback_text("unknown"),
+                    "then": item.get("then") or fallback_text("unknown"),
+                }))
+    use_case_criteria = "\n".join(criteria) or fallback_text("use_case_criteria")
+    widths = ", ".join(str(screen.width) for screen in screens if str(screen.platform).casefold() == "mobile")
+    if not widths:
+        widths = fallback_text("responsive_width")
+    viewport_criteria = render(templates["viewport_criteria"], {"widths": widths})
+    exception_criteria = "\n".join(
+        render(templates["exception_acceptance"], {
+            "condition": str(item.get("condition") or fallback_text("unknown")),
+            "handling": str(item.get("handling") or fallback_text("unknown")),
+            "outcome": render(templates["exception_acceptance_outcome_suffix"], {"value": item.get("outcome")}) if item.get("outcome") else "",
+        }) for item in exceptions
+    ) or fallback_text("exception_criteria")
+    criteria_values = {
+        "acceptance_summary": templates.get("acceptance_summary", ""),
+        "use_case_criteria": use_case_criteria,
+        "viewport_criteria": viewport_criteria,
+        "exception_criteria": exception_criteria,
+        "scope_criteria": fallback_text("scope_criteria"),
+        "traceability_criteria": fallback_text("traceability_criteria"),
+    }
+    acceptance_criteria = "\n".join(render(item, criteria_values) for item in templates["acceptance_criteria"])
+
+    missing = []
+    if not package:
+        missing = ["BA package", "Feature ID", "FD/BR/WF/US traceability", "Scope Out"]
+    else:
+        missing = [label for label, present in (
+            ("Feature ID", bool(feature_id)),
+            ("BR IDs", bool(rule_ids)),
+            ("US IDs", bool(use_case_ids)),
+            ("WF exceptions", bool(exceptions)),
+            ("Scope Out", bool(feature.get("scope_out"))),
+        ) if not present]
+
+    return {
+        "title": title,
+        "objective": objective,
+        "current_state": current_state,
+        "solution": solution,
+        "acceptance_criteria": acceptance_criteria,
+        "source": {
+            "available": package is not None,
+            "feature_id": feature_id,
+            "artifact_id": artifact.get("id") if artifact else None,
+            "version": artifact.get("version") if artifact else None,
+            "missing": missing,
+        },
+    }
+
+
+@router.get("/sessions/{session_id}/huly/preview")
+async def get_huly_attachment_preview(request: Request, session_id: UUID, run_id: UUID) -> dict[str, Any]:
+    store = request.app.state.store
+    session = await store.get_session(session_id)
+    if session is None:
+        raise not_found("Session")
+    run = await store.get_run(run_id)
+    if run is None or run.session_id != session_id:
+        raise not_found("Run")
+    if run.stage != "finished" or run.status != "completed":
+        raise AppError("DESIGN_NOT_APPROVED", "Design is not approved", "Approve the final design before previewing task artifacts.", 409)
+    screens = await store.list_screens(session_id, with_html=True)
+    if not screens:
+        raise AppError("DESIGN_SCREENS_MISSING", "No screens to preview", "The approved session has no saved screens.", 409)
+    try:
+        ba_package, ba_artifact = await asyncio.to_thread(_read_ba_package, session)
+    except Exception:  # noqa: BLE001 - the design preview remains available if BA assets are temporarily unavailable
+        ba_package, ba_artifact = None, None
+    task_draft = _task_draft_from_sources(session, run, screens, ba_package, ba_artifact)
+
+    spec = run.specification if isinstance(run.specification, dict) else {}
+    spec_screens = spec.get("screens") if isinstance(spec.get("screens"), list) else []
+    screen_specs = {str(item.get("id")): item for item in spec_screens if isinstance(item, dict)}
+    markdown = [
+        "# UI Specification",
+        "",
+        f"**Project:** {session.title}",
+        f"**Screen count:** {len(screens)}",
+        "",
+        "> Tài liệu bàn giao UI đã duyệt cho đội phát triển. Nội dung được tổng hợp từ đặc tả màn hình và trạng thái đã lưu; các yêu cầu API/backend chỉ được bao gồm khi có trong nguồn.",
+        "",
+    ]
+
+    def add_list(label: str, values: Any, *, code: bool = False) -> None:
+        if not isinstance(values, list) or not values:
+            return
+        markdown.extend([f"### {label}"] if not label.startswith("### ") else [label])
+        markdown.extend(f"- `{value}`" if code else f"- {value}" for value in values if isinstance(value, (str, int, float)) and str(value).strip())
+        markdown.append("")
+
+    def merge_lists(*values: Any) -> list[str]:
+        merged: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            if not isinstance(value, list):
+                continue
+            for entry in value:
+                if not isinstance(entry, (str, int, float)):
+                    continue
+                text = str(entry).strip()
+                if text and text.casefold() not in seen:
+                    seen.add(text.casefold())
+                    merged.append(text)
+        return merged
+
+    screen_names = {str(item.get("id")): str(item.get("name") or item.get("id")) for item in spec_screens if isinstance(item, dict)}
+
+    for index, screen in enumerate(screens, start=1):
+        item = screen_specs.get(screen.id, {})
+        defaults = spec.get("approved_default_screens", {}).get(screen.id, {}) if isinstance(spec.get("approved_default_screens"), dict) else {}
+        state_refs = spec.get("state_reference_screens", {}).get(screen.id, {}) if isinstance(spec.get("state_reference_screens"), dict) else {}
+        state_specs = spec.get("state_specs", {}) if isinstance(spec.get("state_specs"), dict) else {}
+        state = state_specs.get(screen.id, {})
+        if not isinstance(state, dict):
+            state = {}
+        markdown.extend([f"## {index}. {screen.name}", "", f"**Nền tảng / kích thước:** {screen.platform} · {screen.width}px", "", f"**Mục đích:** {item.get('purpose') or 'Chưa có mô tả riêng trong UI spec.'}", ""])
+        if item.get("layout"):
+            markdown.extend([f"**Bố cục:** {item['layout']}", ""])
+        add_list("Thành phần và nội dung hiển thị", merge_lists(
+            item.get("sections"), item.get("data"), defaults.get("content_outline"),
+            defaults.get("visible_copy"), item.get("must_show"),
+        ))
+        add_list("Hành động người dùng", merge_lists(defaults.get("default_actions")))
+        navigation = item.get("navigation")
+        if isinstance(navigation, list):
+            destinations = [screen_names.get(str(target), str(target)) for target in navigation if str(target).strip()]
+            add_list("Điều hướng", destinations)
+        add_list("Trạng thái màn hình", merge_lists(state.get("states"), state_refs.get("states")))
+        add_list("Nội dung hiển thị theo điều kiện", merge_lists(state.get("conditional_content"), state_refs.get("conditional_content")))
+        refs = state_refs.get("state_spec") if isinstance(state_refs, dict) else None
+        if isinstance(refs, list) and refs:
+            markdown.extend(["### Kích hoạt và hiển thị ban đầu", ""])
+            for ref in refs:
+                if isinstance(ref, dict):
+                    trigger = ref.get("trigger", "")
+                    content = ", ".join(str(v) for v in ref.get("content", []) if v)
+                    visibility = {"visible": "hiển thị", "hidden": "ẩn", "not_applicable": "không áp dụng"}.get(str(ref.get("initial_visibility")), "chưa xác định")
+                    markdown.append(f"- **Khi:** {trigger or 'Chưa mô tả'} · **Ban đầu:** {visibility}" + (f" · **Nội dung:** {content}" if content else ""))
+            markdown.append("")
+        add_list("Quy tắc giao diện", merge_lists(state.get("rules"), state_refs.get("rules")))
+        scenarios = state.get("state_scenarios")
+        if isinstance(scenarios, list):
+            scenario_lines = []
+            for scenario in scenarios:
+                if isinstance(scenario, dict):
+                    parts = [str(scenario.get("name") or "Kịch bản")]
+                    clicks = scenario.get("click_selectors")
+                    if isinstance(clicks, list) and clicks:
+                        parts.append("thao tác: " + " → ".join(str(value) for value in clicks))
+                    visible = scenario.get("visible")
+                    if isinstance(visible, list) and visible:
+                        parts.append("hiển thị: " + ", ".join(str(value) for value in visible))
+                    hidden = scenario.get("hidden")
+                    if isinstance(hidden, list) and hidden:
+                        parts.append("ẩn: " + ", ".join(str(value) for value in hidden))
+                    scenario_lines.append("; ".join(parts))
+            add_list("Kịch bản kiểm tra trạng thái", scenario_lines)
+
+    design = spec.get("design") if isinstance(spec.get("design"), dict) else {}
+    markdown.extend(["## Hướng thiết kế chung", ""])
+    for label, key in (("Định hướng", "style_direction"), ("Mood", "mood"), ("Font tiêu đề", "heading_font"), ("Font nội dung", "body_font"), ("Bo góc", "radius"), ("Mật độ", "density")):
+        value = spec.get(key) if key == "style_direction" else design.get(key)
+        if value:
+            markdown.append(f"- **{label}:** {value}")
+    add_list("Nên làm", design.get("do"))
+    add_list("Tránh", design.get("dont"))
+    markdown.append("")
+
+    brief = await store.get_design_brief(session_id)
+    contract = brief.selected_style_contract if isinstance(brief.selected_style_contract, dict) else {}
+    palette = contract.get("palette") if isinstance(contract.get("palette"), dict) else {}
+    tokens = {
+        "format": "agent-designer-style-contract-v1",
+        "name": brief.style_name or contract.get("name") or "Agent Designer style contract",
+        "description": "Thông số định hướng thị giác đã chọn. Đây chưa phải bộ design token đầy đủ được trích xuất từ CSS của mọi màn hình.",
+        "source": "Approved Agent Designer style selection",
+        "color": palette,
+        "typography": {"fontFamily": {"heading": contract.get("heading_font") or "", "body": contract.get("body_font") or ""}},
+        "shape": {"radius": contract.get("radius") or "", "density": contract.get("density") or ""},
+        "visual_language": {key: contract[key] for key in ("composition", "surface_language", "shape_language", "hero_placement") if contract.get(key)},
+        "not_included": ["CSS variables resolved from rendered screens", "Spacing and sizing scale", "Component-level tokens", "Per-screen overrides"],
+    }
+    tokens_available = bool(palette or contract.get("heading_font") or contract.get("body_font"))
+    return {
+        "screens": [
+            {"id": screen.id, "name": screen.name, "platform": screen.platform, "width": screen.width}
+            for screen in screens
+        ],
+        "spec_markdown": "\n".join(markdown).strip(),
+        "design_tokens": tokens if tokens_available else None,
+        "task_draft": task_draft,
+    }
+
+
+@router.post("/sessions/{session_id}/huly/issues", status_code=status.HTTP_201_CREATED)
+async def create_huly_issue(request: Request, session_id: UUID, body: HulyIssueCreate) -> dict[str, Any]:
+    store = request.app.state.store
+    session = await store.get_session(session_id)
+    if session is None:
+        raise not_found("Session")
+    run = await store.get_run(body.run_id)
+    if run is None or run.session_id != session_id:
+        raise not_found("Run")
+    if run.stage != "finished" or run.status != "completed":
+        raise AppError(
+            "DESIGN_NOT_APPROVED",
+            "Design is not approved",
+            "Approve the final design before creating a Huly issue.",
+            409,
+        )
+    screens = await store.list_screens(session_id, with_html=True)
+    if not screens:
+        raise AppError("DESIGN_SCREENS_MISSING", "No screens to hand off", "The approved session has no saved screens.", 409)
+    projects = await huly_client.list_projects(request.app.state.settings)
+    if not any(body.project_id in {project["id"], project["identifier"], project["huly_id"]} for project in projects):
+        raise AppError("HULY_PROJECT_INVALID", "Huly project is unavailable", "Select a project from the current Huly workspace.", 422)
+    description = "\n\n".join(
+        [
+            f"## Mục tiêu\n{body.objective.strip()}",
+            f"## Hiện trạng\n{body.current_state.strip()}",
+            f"## Giải pháp\n{body.solution.strip()}",
+            f"## Tiêu chí chấp nhận (AC)\n{body.acceptance_criteria.strip()}",
+            "## Màn hình thiết kế đã duyệt\n" + "\n".join(f"- {screen.name} ({screen.platform})" for screen in screens),
+            f"Nguồn: Agent Designer · Session `{session_id}` · Run `{run.id}`",
+        ]
+    )
+    huly_project = next(project for project in projects if body.project_id in {project["id"], project["identifier"], project["huly_id"]})
+    design = await design_context(store, session)
+    upload_root = Path("/tmp/huly-uploads")
+    upload_root.mkdir(parents=True, exist_ok=True)
+    attachments: list[dict[str, str]] = []
+    with tempfile.TemporaryDirectory(prefix="approved-design-", dir=upload_root) as temp_dir:
+        output_dir = Path(temp_dir)
+        for index, screen in enumerate(screens, start=1):
+            rendered = await request.app.state.renderer.render(
+                await inline_assets(screen.html or "", session.project_id),
+                width=screen.width,
+                screenshot="png",
+                lint=False,
+                theme_css=design.theme_css,
+                fonts=design.fonts,
+            )
+            if not rendered.image:
+                raise AppError("HULY_EXPORT_FAILED", "Could not export screen PNG", f"PNG export failed for {screen.name}.", 502)
+            filename = f"{index:02d}-{screen.id}.png"
+            file_path = output_dir / filename
+            file_path.write_bytes(rendered.image or b"")
+            attachments.append({"filename": filename, "content_type": "image/png", "file_path": str(file_path), "description": f"Màn hình {index}: {screen.name}"})
+
+        artifact_preview = await get_huly_attachment_preview(request, session_id, run.id)
+        spec_path = output_dir / "ui-spec.md"
+        spec_path.write_text(artifact_preview["spec_markdown"], encoding="utf-8")
+        attachments.append({"filename": spec_path.name, "content_type": "text/markdown", "file_path": str(spec_path), "description": "Đặc tả UI của toàn bộ màn hình đã duyệt"})
+        if artifact_preview["design_tokens"] is not None:
+            tokens_path = output_dir / "design-tokens.json"
+            tokens_path.write_text(json.dumps(artifact_preview["design_tokens"], ensure_ascii=False, indent=2), encoding="utf-8")
+            attachments.append({"filename": tokens_path.name, "content_type": "application/json", "file_path": str(tokens_path), "description": "Design tokens/style contract đã duyệt"})
+
+        result = await huly_client.create_issue(
+            request.app.state.settings,
+            project=huly_project["identifier"],
+            title=body.title.strip(),
+            description=description,
+            attachments=attachments,
+        )
+    return result
 
 
 @router.post("/attachments/parse", response_model=AttachmentParseResult)

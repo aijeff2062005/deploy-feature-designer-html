@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     # Browser origin of the gateway: the design iframe loads vendor scripts from here.
     platform_public_url: str = "http://localhost:8080"
     designer_shared_secret: str = ""
+    # Huly task handoff via the internal Huly MCP sidecar.
+    huly_url: str = "https://huly.primetek.ai"
+    huly_workspace: str = "testing"
+    huly_project: str = "6af67446e70e843f5ccd8e8a"
+    huly_token: str = ""
+    huly_mcp_url: str = "http://huly-mcp:3001/mcp"
+    huly_mcp_auth_token: str = Field("", validation_alias=AliasChoices("HULY_MCP_AUTH_TOKEN", "MCP_AUTH_TOKEN"))
+    huly_attachment_mcp_url: str = "http://huly-attachments:3002/mcp"
     # One screen = a draft call + at most this many review calls (screenshot + lint → OK / edits).
     designer_review_rounds: int = Field(2, validation_alias="DESIGNER_REVIEW_ROUNDS")
     # Screens after the first (which sets the shell) are built concurrently.

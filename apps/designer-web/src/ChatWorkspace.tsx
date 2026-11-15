@@ -1,6 +1,9 @@
 import {
     ArrowUp,
     Bot,
+    Braces,
+    ChevronLeft,
+    ChevronRight,
     Check,
     Download,
     ExternalLink,
@@ -10,10 +13,16 @@ import {
     FileCode,
     FileText,
     Image,
+    LayoutGrid,
     LoaderCircle,
+    Maximize2,
+    Minimize2,
     Paperclip,
+    ClipboardList,
     Sparkles,
     Workflow,
+    ZoomIn,
+    ZoomOut,
     X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -32,6 +41,10 @@ import { MarkdownRenderer } from "./MarkdownRenderer";
 import type {
     ParsedAttachment,
     Run,
+    HulyIssueDraft,
+    HulyIssueResult,
+    HulyAttachmentPreview,
+    HulyProject,
     WorkflowEvent,
     ExactAsset,
 } from "./types";
@@ -408,6 +421,21 @@ export function ChatWorkspace({
     const [selection, setSelection] = useState<CanvasSelection>();
     const [submittingReview, setSubmittingReview] = useState(false);
     const [activityLogOpen, setActivityLogOpen] = useState(false);
+    const [hulyDialogOpen, setHulyDialogOpen] = useState(false);
+    const [hulyProjects, setHulyProjects] = useState<HulyProject[]>([]);
+    const [hulyProjectId, setHulyProjectId] = useState("");
+    const [hulyDraft, setHulyDraft] = useState<Omit<HulyIssueDraft, "run_id" | "project_id"> | null>(null);
+    const [hulyLoading, setHulyLoading] = useState(false);
+    const [hulySubmitting, setHulySubmitting] = useState(false);
+    const [hulyError, setHulyError] = useState("");
+    const [hulyCreated, setHulyCreated] = useState<HulyIssueResult | null>(null);
+    const [hulyArtifacts, setHulyArtifacts] = useState<HulyAttachmentPreview | null>(null);
+    const [hulyPreviewTab, setHulyPreviewTab] = useState<"png" | "spec" | "tokens" | null>(null);
+    const [hulyPreviewIndex, setHulyPreviewIndex] = useState(0);
+    const [hulyPreviewZoom, setHulyPreviewZoom] = useState(1);
+    const [hulyPngMode, setHulyPngMode] = useState<"overview" | "screen">("overview");
+    const [hulyPngImmersive, setHulyPngImmersive] = useState(false);
+    const [hulyPreviewError, setHulyPreviewError] = useState("");
     const conversationEndRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     // Platform: shared project files can be cited with "@" or dragged in.
@@ -423,7 +451,95 @@ export function ChatWorkspace({
         (run?.stage === "review_spec" || run?.stage === "review_final") &&
         run.status === "waiting_review";
     const specScreens = run?.specification?.schema_version === "html-1" ? run.specification.screens : [];
+    const finalApproved = Boolean(
+        run?.stage === "finished" &&
+        run.status === "completed" &&
+        run.specification?.schema_version === "html-1" &&
+        run.specification.screens.length > 0,
+    );
     const finalBlocked = false;
+
+    const openHulyDialog = async () => {
+        if (!run || !sessionId) return;
+        setHulyDialogOpen(true);
+        setHulyError("");
+        setHulyCreated(null);
+        setHulyArtifacts(null);
+        setHulyPreviewTab(null);
+        setHulyPreviewIndex(0);
+        setHulyPreviewZoom(1);
+        setHulyPreviewError("");
+        setHulyLoading(true);
+        const screens = run.specification?.schema_version === "html-1" ? run.specification.screens : [];
+        const screenNames = screens.map((screen) => screen.name).join(", ");
+        const screenNotes = screens.map((screen, index) => {
+            const details = [
+                screen.purpose ? `Mục đích: ${screen.purpose.slice(0, 320)}` : "",
+                screen.sections?.length ? `Thành phần: ${screen.sections.slice(0, 6).join(", ")}` : "",
+                screen.states?.length ? `Trạng thái: ${screen.states.slice(0, 6).join(", ")}` : "",
+            ].filter(Boolean);
+            return `${index + 1}. ${screen.name}${details.length ? `\n   ${details.join("\n   ")}` : ""}`;
+        }).join("\n\n");
+        const objective = screens.length
+            ? `Triển khai ${screens.length} màn hình UI đã được PO duyệt trong Agent Designer: ${screenNames}.`
+            : "Triển khai UI theo thiết kế đã được PO duyệt trong Agent Designer.";
+        const acceptanceCriteria = [
+            ...screens.map((screen) => `- Màn hình ${screen.name} hiển thị đúng bố cục và nội dung theo thiết kế đã duyệt.${screen.states?.length ? ` Các trạng thái cần có: ${screen.states.slice(0, 6).join(", ")}.` : ""}`),
+            "- Các thao tác chính của màn hình hoạt động đúng theo yêu cầu.",
+            "- PO xác nhận kết quả trên môi trường kiểm thử.",
+        ].join("\n");
+        setHulyDraft({
+            title: screens.length === 1
+                ? `Triển khai màn hình ${screens[0].name}`
+                : `Triển khai ${screens.length} màn hình UI đã duyệt`,
+            objective,
+            current_state: `Thiết kế UI${screenNames ? ` (${screenNames})` : ""} đã được PO duyệt trong Agent Designer; hiện chưa có task Huly theo dõi phần triển khai.`,
+            solution: `${run.specification?.style_direction ? `Hướng thiết kế: ${run.specification.style_direction.slice(0, 500)}\n\n` : ""}Danh sách màn hình và phạm vi:\n${screenNotes}`,
+            acceptance_criteria: acceptanceCriteria,
+        });
+        const [projectsResult, previewResult] = await Promise.allSettled([
+            api.hulyProjects(),
+            api.hulyAttachmentPreview(sessionId, run.id),
+        ]);
+        if (projectsResult.status === "fulfilled") {
+            const response = projectsResult.value;
+            setHulyProjects(response.projects);
+            const preferred = response.projects.find((project) => project.huly_id === response.default_project_id || project.id === response.default_project_id || project.identifier === response.default_project_id);
+            setHulyProjectId((current) => current || preferred?.id || response.projects[0]?.id || "");
+        } else {
+            setHulyError(projectsResult.reason instanceof Error ? projectsResult.reason.message : "Không tải được danh sách project Huly.");
+        }
+        if (previewResult.status === "fulfilled") {
+            const preview = previewResult.value;
+            setHulyArtifacts(preview);
+            if (preview.task_draft) {
+                setHulyDraft({
+                    title: preview.task_draft.title,
+                    objective: preview.task_draft.objective,
+                    current_state: preview.task_draft.current_state,
+                    solution: preview.task_draft.solution,
+                    acceptance_criteria: preview.task_draft.acceptance_criteria,
+                });
+            }
+        } else {
+            setHulyPreviewError(previewResult.reason instanceof Error ? previewResult.reason.message : "Không tải được tài liệu xem trước.");
+        }
+        setHulyLoading(false);
+    };
+
+    const submitHulyIssue = async () => {
+        if (!run || !sessionId || !hulyDraft || !hulyProjectId || hulySubmitting) return;
+        setHulySubmitting(true);
+        setHulyError("");
+        try {
+            const result = await api.createHulyIssue(sessionId, { ...hulyDraft, run_id: run.id, project_id: hulyProjectId });
+            setHulyCreated(result);
+        } catch (error) {
+            setHulyError(error instanceof Error ? error.message : "Không tạo được task trên Huly.");
+        } finally {
+            setHulySubmitting(false);
+        }
+    };
 
     // The design page posts the element the user clicked; it is attached to the next message.
     useEffect(() => {
@@ -988,6 +1104,33 @@ export function ChatWorkspace({
                     </article>
                 )}
 
+                {finalApproved && run && (
+                    <article className="message assistant-message chat-review-message" aria-label="Create Huly issue">
+                        <AssistantAvatar />
+                        <div className="assistant-body">
+                            <div className="assistant-header">
+                                <small>Designer</small>
+                                <span className="chat-review-stage-badge">Design approved</span>
+                            </div>
+                            <div className="chat-review-card huly-approved-card">
+                                <div className="huly-approved-icon" aria-hidden="true">
+                                    <Sparkles size={25} />
+                                    <span><Check size={13} strokeWidth={3} /></span>
+                                </div>
+                                <div className="huly-approved-copy">
+                                        <h4 className="chat-review-title">Thiết kế đã được duyệt</h4>
+                                        <p className="chat-review-subtitle">Xem lại nội dung task, chọn project Huly rồi xác nhận tạo issue.</p>
+                                </div>
+                                <button className="chat-review-btn approve huly-create-cta" type="button" onClick={openHulyDialog} disabled={Boolean(hulyCreated)}>
+                                    <ClipboardList size={16} />
+                                    {hulyCreated ? `Đã tạo ${hulyCreated.identifier}` : "Xác nhận & tạo task"}
+                                </button>
+                                {hulyCreated?.url && <a className="huly-created-link" href={hulyCreated.url} target="_blank" rel="noreferrer">Mở task {hulyCreated.identifier} trên Huly</a>}
+                            </div>
+                        </div>
+                    </article>
+                )}
+
                 {isAgentWorking && (
                     <article
                         className="message assistant-message typing-indicator-message"
@@ -1249,6 +1392,144 @@ export function ChatWorkspace({
                     </div>
                 </section>
             </div>
+            {hulyDialogOpen && hulyDraft && (
+                <div className="huly-dialog-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !hulySubmitting) setHulyDialogOpen(false); }}>
+                    <section className="huly-dialog" role="dialog" aria-modal="true" aria-labelledby="huly-dialog-title">
+                        <header className="huly-dialog-header">
+                            <div><h2 id="huly-dialog-title">Xác nhận tạo task Huly</h2><p>Chọn project đích và rà nội dung trước khi gửi.</p></div>
+                            <button className="huly-dialog-close" type="button" onClick={() => setHulyDialogOpen(false)} disabled={hulySubmitting} aria-label="Đóng"><X size={19} /></button>
+                        </header>
+                        <div className="huly-dialog-body">
+                            <label className="huly-field"><span>Project Huly</span>
+                                <select value={hulyProjectId} onChange={(event) => setHulyProjectId(event.target.value)} disabled={hulyLoading || hulySubmitting || hulyProjects.length === 0}>
+                                    {hulyProjects.length === 0 && <option value="">{hulyLoading ? "Đang tải project..." : "Không có project khả dụng"}</option>}
+                                    {hulyProjects.map((project) => <option key={project.id} value={project.id}>{project.name}{project.identifier ? ` (${project.identifier})` : ""}</option>)}
+                                </select>
+                            </label>
+                            <label className="huly-field"><span>Tên task <small>{hulyDraft.title.length}/80 ký tự khuyến nghị</small></span><input value={hulyDraft.title} maxLength={240} onChange={(event) => setHulyDraft({ ...hulyDraft, title: event.target.value })} /></label>
+                            <label className="huly-field"><span>Mục tiêu</span><textarea rows={6} value={hulyDraft.objective} onChange={(event) => setHulyDraft({ ...hulyDraft, objective: event.target.value })} /></label>
+                            <label className="huly-field"><span>Hiện trạng</span><textarea rows={6} value={hulyDraft.current_state} onChange={(event) => setHulyDraft({ ...hulyDraft, current_state: event.target.value })} /></label>
+                            <label className="huly-field"><span>Giải pháp</span><textarea rows={8} value={hulyDraft.solution} onChange={(event) => setHulyDraft({ ...hulyDraft, solution: event.target.value })} /></label>
+                            <label className="huly-field"><span>Tiêu chí chấp nhận (AC)</span><textarea rows={8} value={hulyDraft.acceptance_criteria} onChange={(event) => setHulyDraft({ ...hulyDraft, acceptance_criteria: event.target.value })} /></label>
+                            <section className="huly-attachments-preview" aria-label="Tài liệu thiết kế xem trước">
+                                <div className="huly-attachments-heading">
+                                    <strong><Paperclip size={15} /> Tài liệu đính kèm</strong>
+                                    <span>Bấm để xem trước</span>
+                                </div>
+                                {hulyArtifacts ? (
+                                    <div className="huly-attachment-chips">
+                                        <button type="button" className="huly-attachment-chip" onClick={() => { setHulyPreviewIndex(0); setHulyPreviewZoom(1); setHulyPreviewTab("png"); }} disabled={!hulyArtifacts.screens.length}>
+                                            <Image size={16} /><span>PNG màn hình</span><small>{hulyArtifacts.screens.length}</small>
+                                        </button>
+                                        <button type="button" className="huly-attachment-chip" onClick={() => setHulyPreviewTab("spec")}>
+                                            <FileText size={16} /><span>UI spec .md</span><small>1</small>
+                                        </button>
+                                        <button type="button" className={`huly-attachment-chip${hulyArtifacts.design_tokens ? "" : " is-unavailable"}`} onClick={() => setHulyPreviewTab("tokens")}>
+                                            <Braces size={16} /><span>Style contract.json</span><small>{hulyArtifacts.design_tokens ? "1" : "Chưa có"}</small>
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <p className="huly-preview-loading">{hulyPreviewError || "Đang chuẩn bị tài liệu xem trước..."}</p>
+                                )}
+                                <p className="huly-preview-note">Xem trước artifact đã tạo từ thiết kế được duyệt.</p>
+                            </section>
+                            {hulyError && <p className="huly-dialog-error" role="alert">{hulyError}</p>}
+                            {hulyCreated && <p className="huly-dialog-success" role="status">Đã tạo task {hulyCreated.identifier} và đính kèm {hulyCreated.attachments?.length ?? 0} tài liệu.</p>}
+                            {Boolean(hulyCreated?.attachment_errors?.length) && <p className="huly-dialog-error" role="alert">Task đã được tạo nhưng một số file chưa đính kèm: {hulyCreated?.attachment_errors?.map((item) => item.filename).join(", ")}. Mở task Huly để kiểm tra trước khi thử lại.</p>}
+                        </div>
+                        <footer className="huly-dialog-footer">
+                            <button className="chat-review-btn" type="button" onClick={() => setHulyDialogOpen(false)} disabled={hulySubmitting}>Đóng</button>
+                            {hulyCreated ? (hulyCreated.url && <a className="chat-review-btn approve" href={hulyCreated.url} target="_blank" rel="noreferrer">Mở task trên Huly</a>) : (
+                                <button className="chat-review-btn approve" type="button" onClick={submitHulyIssue} disabled={hulyLoading || hulySubmitting || !hulyProjectId || !hulyDraft.title.trim() || !hulyDraft.objective.trim() || !hulyDraft.current_state.trim() || !hulyDraft.solution.trim() || !hulyDraft.acceptance_criteria.trim()}>
+                                    {hulySubmitting ? <><LoaderCircle className="huly-spinner" size={15} /> Đang tạo...</> : <><Check size={15} /> Xác nhận & tạo task</>}
+                                </button>
+                            )}
+                        </footer>
+                    </section>
+                </div>
+            )}
+            {hulyPreviewTab && hulyArtifacts && (
+                <div className="huly-preview-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setHulyPreviewTab(null); }}>
+                    <section className={`huly-preview-dialog${hulyPreviewTab === "png" ? " is-png-preview" : ""}${hulyPreviewTab === "png" && hulyPngMode === "overview" ? " is-flow-overview" : ""}${hulyPngImmersive ? " is-png-immersive" : ""}`} role="dialog" aria-modal="true" aria-label="Xem trước tài liệu đính kèm">
+                        <header className="huly-preview-header">
+                            <div className="huly-preview-title-icon">{hulyPreviewTab === "png" ? <Image size={18} /> : hulyPreviewTab === "spec" ? <FileText size={18} /> : <Braces size={18} />}</div>
+                            <div className="huly-preview-title-copy">
+                                <h2>{hulyPreviewTab === "png" ? `PNG màn hình (${hulyArtifacts.screens.length})` : hulyPreviewTab === "spec" ? "UI spec.md" : "style-contract.json"}</h2>
+                                <p>{hulyPreviewTab === "png" ? "Xem từng màn hình trước khi tạo task Huly" : hulyPreviewTab === "spec" ? "Đặc tả các màn hình, nội dung mặc định và trạng thái đã duyệt" : "Bảng màu và định hướng thị giác; chưa phải token CSS đầy đủ"}</p>
+                            </div>
+                            <button type="button" className="huly-dialog-close" onClick={() => setHulyPreviewTab(null)} aria-label="Đóng xem trước"><X size={19} /></button>
+                        </header>
+                        <nav className="huly-preview-tabs" aria-label="Loại tài liệu">
+                            <button type="button" className={hulyPreviewTab === "png" ? "active" : ""} onClick={() => setHulyPreviewTab("png")}><Image size={15} /> PNG màn hình</button>
+                            <button type="button" className={hulyPreviewTab === "spec" ? "active" : ""} onClick={() => setHulyPreviewTab("spec")}><FileText size={15} /> UI spec .md</button>
+                            <button type="button" className={hulyPreviewTab === "tokens" ? "active" : ""} onClick={() => setHulyPreviewTab("tokens")}><Braces size={15} /> Style contract</button>
+                        </nav>
+                        {hulyPreviewTab === "png" && (
+                            <div className="huly-png-preview-body">
+                                {hulyArtifacts.screens.length ? (
+                                    <>
+                                        <div className="huly-png-mode-switch" role="tablist" aria-label="Cách xem màn hình">
+                                            <button type="button" className={hulyPngMode === "overview" ? "active" : ""} onClick={() => setHulyPngMode("overview")}><Workflow size={15} /> Tổng quan luồng</button>
+                                            <button type="button" className={hulyPngMode === "screen" ? "active" : ""} onClick={() => setHulyPngMode("screen")}><Image size={15} /> Từng màn hình</button>
+                                        </div>
+                                        {hulyPngMode === "overview" ? (
+                                            <div className="huly-flow-overview">
+                                                <div className="huly-flow-overview-meta"><span>{hulyArtifacts.screens[0]?.platform === "mobile" ? "Mobile" : hulyArtifacts.screens[0]?.platform} · {hulyArtifacts.screens[0]?.width}px</span><span>{hulyArtifacts.screens.length} màn hình · bấm vào màn hình để xem chi tiết</span></div>
+                                                <div className="huly-flow-overview-track">
+                                                    {hulyArtifacts.screens.map((screen, index) => (
+                                                        <div className="huly-flow-step" key={screen.id}>
+                                                            <button type="button" className="huly-flow-screen" onClick={() => { setHulyPreviewIndex(index); setHulyPreviewZoom(1); setHulyPngMode("screen"); }}>
+                                                                <span className="huly-flow-screen-title"><b>{index + 1}</b><strong>{screen.name}</strong></span>
+                                                                <span className="huly-flow-screen-image"><img src={api.screenshotUrl(sessionId!, screen.id, undefined, 480)} alt={`Tổng quan: ${screen.name}`} loading={index < 2 ? "eager" : "lazy"} /></span>
+                                                            </button>
+                                                            {index < hulyArtifacts.screens.length - 1 && <span className="huly-flow-connector" aria-hidden="true">→</span>}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        ) : (
+                                        <>
+                                        <div className="huly-png-toolbar">
+                                            <div><strong>{hulyArtifacts.screens[hulyPreviewIndex]?.name}</strong><span>Màn hình {hulyPreviewIndex + 1}/{hulyArtifacts.screens.length}</span></div>
+                                            <div className="huly-zoom-controls">
+                                                <button type="button" onClick={() => setHulyPreviewZoom((zoom) => Math.max(0.5, Number((zoom - 0.1).toFixed(1))))} aria-label="Thu nhỏ"><ZoomOut size={16} /></button>
+                                                <span>{Math.round(hulyPreviewZoom * 100)}%</span>
+                                                <button type="button" onClick={() => setHulyPreviewZoom((zoom) => Math.min(2, Number((zoom + 0.1).toFixed(1))))} aria-label="Phóng to"><ZoomIn size={16} /></button>
+                                                <button type="button" onClick={() => setHulyPngImmersive((value) => !value)} aria-label={hulyPngImmersive ? "Thoát toàn màn hình" : "Xem toàn màn hình"}>{hulyPngImmersive ? <Minimize2 size={16} /> : <Maximize2 size={16} />}</button>
+                                            </div>
+                                        </div>
+                                        <div className="huly-png-canvas">
+                                            <button type="button" className="huly-png-nav previous" onClick={() => setHulyPreviewIndex((index) => (index + hulyArtifacts.screens.length - 1) % hulyArtifacts.screens.length)} aria-label="Màn hình trước"><ChevronLeft size={20} /></button>
+                                            <img key={hulyArtifacts.screens[hulyPreviewIndex].id} src={api.screenshotUrl(sessionId!, hulyArtifacts.screens[hulyPreviewIndex].id)} alt={`PNG xem trước: ${hulyArtifacts.screens[hulyPreviewIndex].name}`} style={{ zoom: hulyPreviewZoom }} />
+                                            <button type="button" className="huly-png-nav next" onClick={() => setHulyPreviewIndex((index) => (index + 1) % hulyArtifacts.screens.length)} aria-label="Màn hình tiếp theo"><ChevronRight size={20} /></button>
+                                        </div>
+                                        <div className="huly-png-thumbnails">
+                                            {hulyArtifacts.screens.map((screen, index) => (
+                                                <button type="button" key={screen.id} className={index === hulyPreviewIndex ? "active" : ""} onClick={() => { setHulyPreviewIndex(index); setHulyPreviewZoom(1); }}>
+                                                    <img src={api.screenshotUrl(sessionId!, screen.id, undefined, 320)} alt="" loading="lazy" />
+                                                    <span>{screen.name}</span>
+                                                </button>
+                                            ))}
+                                        </div>
+                                        </>
+                                        )}
+                                    </>
+                                ) : <p className="huly-preview-empty">Session chưa có PNG màn hình.</p>}
+                            </div>
+                        )}
+                        {hulyPreviewTab === "spec" && <div className="huly-document-preview"><MarkdownRenderer content={hulyArtifacts.spec_markdown} className="huly-preview-markdown" /></div>}
+                        {hulyPreviewTab === "tokens" && (
+                            <div className="huly-document-preview">
+                                {hulyArtifacts.design_tokens ? <pre className="huly-json-preview"><code>{JSON.stringify(hulyArtifacts.design_tokens, null, 2)}</code></pre> : <div className="huly-preview-empty"><Braces size={24} /><strong>Chưa có style contract</strong><span>Session này chưa có style contract chứa palette hoặc font.</span></div>}
+                            </div>
+                        )}
+                        <footer className="huly-preview-footer">
+                            <span>{hulyPreviewTab === "png" ? `${hulyArtifacts.screens.length} PNG · ${hulyPngMode === "overview" ? "tổng quan luồng" : `màn hình ${hulyPreviewIndex + 1} đang xem`}` : hulyPreviewTab === "spec" ? "UI spec · Markdown preview" : "Style contract · JSON preview"}</span>
+                            <button type="button" className="chat-review-btn" onClick={() => setHulyPreviewTab(null)}>Đóng xem trước</button>
+                        </footer>
+                    </section>
+                </div>
+            )}
         </main>
     );
 }

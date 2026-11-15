@@ -277,6 +277,19 @@ design page (`/designer/canvas.html`) in a new tab. The design page has two view
 Design systems are imported from a Figma `.fig` (Settings → Design system); exports are `.fig` (opens in Figma;
 one page with a row per screen, or a page per screen), PNG per screen/state and an offline HTML zip.
 
+**Huly task handoff.** The Designer deployment includes an internal Huly MCP sidecar. Set
+`HULY_URL`, `HULY_WORKSPACE`, `HULY_PROJECT`, and the dedicated Agent account's `HULY_TOKEN`
+in the ignored `.env` file. `MCP_AUTH_TOKEN` protects the internal MCP HTTP endpoint and is
+separate from the Huly account token. Do not commit either token. The sidecar is not exposed
+as a host port and uses the `project` tool profile. After the PO approves the final design,
+the chat shows **Xác nhận & tạo task**. The dialog loads available Huly projects and lets the
+PM review/edit the title, Mục tiêu, Hiện trạng, Giải pháp and Tiêu chí chấp nhận (AC) before
+creating an issue. It also lists the approved screens in the issue description. The Huly API
+token stays on the server and is never sent to the browser.
+
+The configured destination is `https://huly.primetek.ai`, workspace `testing`, project
+`6af67446e70e843f5ccd8e8a`.
+
 **Logs.** Local: `logs/<service>/<service>.log` (JSON lines, daily rotation, 14 days), each request with `user`,
 `project_id`, `request_id`. Per project: `projects/<project_id>/logs/<service>/<date>/*.jsonl` in storage.
 

@@ -80,6 +80,62 @@ export interface Screen {
     html?: string | null;
 }
 
+export interface HulyProject {
+    id: string;
+    huly_id: string;
+    name: string;
+    identifier: string;
+}
+
+export interface HulyProjectsResponse {
+    projects: HulyProject[];
+    default_project_id: string;
+}
+
+export interface HulyIssueDraft {
+    run_id: string;
+    project_id: string;
+    title: string;
+    objective: string;
+    current_state: string;
+    solution: string;
+    acceptance_criteria: string;
+}
+
+export interface HulyIssueResult {
+    identifier: string;
+    url: string;
+    attachments?: { filename: string; status: string }[];
+    attachment_errors?: { filename: string; error: string }[];
+}
+
+export interface HulyPreviewScreen {
+    id: string;
+    name: string;
+    platform: "mobile" | "tablet" | "desktop" | "responsive";
+    width: number;
+}
+
+export interface HulyAttachmentPreview {
+    screens: HulyPreviewScreen[];
+    spec_markdown: string;
+    design_tokens: Record<string, unknown> | null;
+    task_draft: {
+        title: string;
+        objective: string;
+        current_state: string;
+        solution: string;
+        acceptance_criteria: string;
+        source: {
+            available: boolean;
+            feature_id: string;
+            artifact_id?: string | null;
+            version?: number | null;
+            missing: string[];
+        };
+    };
+}
+
 export interface ScreenVersion {
     version: number;
     created_at: string;
