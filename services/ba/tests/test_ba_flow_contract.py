@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
 
 from agents.ba_agent.constants import (
     AUTHOR_FD_DISCUSSION,
@@ -26,6 +27,7 @@ from agents.ba_agent.section_gate import (
     can_proceed_to_validation,
     has_critical_open_oq,
     section_is_complete,
+    record_package_change_review,
     sync_sections_status_from_flags,
 )
 from agents.sub_graph.feature_definition.schemas import FeatureDefinitionData
@@ -229,7 +231,7 @@ def test_section_completable_vs_package_validation():
     assert can_proceed_to_validation(state) is False
 
 
-def test_fd_merge_appends_actors_without_wipe():
+def test_fd_merge_replaces_supplied_lists_and_preserves_omitted_lists():
     current = FeatureDefinitionData(
         goal="Sell flags online before 2/9",
         actors=["ACT-KHACH: buyer", "ACT-ADMIN: admin"],
@@ -244,10 +246,8 @@ def test_fd_merge_appends_actors_without_wipe():
     )
     merged = merge_feature_definition_data(current, delta)
     assert merged.goal == "Sell flags online before 2/9"
-    assert "ACT-KHACH: buyer" in merged.actors
-    assert "ACT-SHIPPER: shipper" in merged.actors
-    assert "catalog" in merged.scope_in
-    assert "checkout" in merged.scope_in
+    assert merged.actors == ["ACT-SHIPPER: shipper"]
+    assert merged.scope_in == ["checkout"]
     assert merged.scope_out == ["ads"]
 
 
@@ -428,6 +428,139 @@ def test_wf_f1_counts_numbered_main_flow_not_only_tables():
     flags = check_wf_flags_logic(ctx)
     assert flags["WF-F1"]["status"] == "PASS"
     assert flags["WF-F2"]["status"] == "PENDING_SEMANTIC"
+
+
+def test_package_review_does_not_ignore_section_blockers(monkeypatch):
+    import agents.sub_graph.validation_agent.checks as cross_checks
+    import agents.sub_graph.validation_agent.logic as schema_logic
+
+    monkeypatch.setattr(cross_checks, "run_cross_section_checks", lambda state: ([], [], []))
+    monkeypatch.setattr(schema_logic, "run_schema_check", lambda state: None)
+    state = {
+        "current_turn": 3,
+        "artifacts": {"workflow": {"workflow_md_content": "available"}},
+        "flags": {
+            "wf": {
+                "WF-F1": {"status": "FAIL", "name": "Main flow defined", "detail": "No valid steps."},
+                "WF-F2": {"status": "PASS"},
+                "WF-F4": {"status": "PASS"},
+                "WF-F6": {"status": "PASS"},
+            }
+        },
+        "sections_status": {},
+        "open_questions": [],
+        "assumptions": [],
+    }
+
+    record_package_change_review(state, "workflow")
+
+    review = state["_ba_change_review"]
+    assert review["status"] == "needs_fixes"
+    assert any(item["check_id"] == "WF-F1" for item in review["failed_checks"])
+
+
+def test_wf_handoff_keeps_feature_and_workflow_state_ids_separate():
+    content = """
+## Main Flow
+| Step | Actor | Action | BR | Gateway |
+| :--- | :--- | :--- | :--- | :--- |
+| 1 | ACT-USER | Begin | | |
+| 2 | ACT-SYSTEM | Verify | | |
+| 3 | ACT-USER | Finish | | |
+
+## End States
+| ID | Description | Branch |
+| :--- | :--- | :--- |
+| WF-END-A | Authenticated session established | Successful verification |
+"""
+    ctx = MagicMock()
+    ctx.state = {
+        "artifacts": {
+            "workflow": {"workflow_md_content": content},
+            "feature_definition": {
+                "continuity": {
+                    "has_successor": True,
+                    "exit_state_id": "FD-OUTCOME-A",
+                    "exit_state": "Authenticated session established",
+                    "handoffs": [
+                        {
+                            "exit_state_id": "FD-OUTCOME-A",
+                            "exit_state": "Authenticated session established",
+                        }
+                    ],
+                }
+            },
+        },
+        "flags": {},
+        "active_section": "workflow",
+        "sections_status": {},
+    }
+
+    flags = check_wf_flags_logic(ctx)
+
+    assert flags["WF-F6"]["status"] == "PASS"
+    continuity = ctx.state["artifacts"]["feature_definition"]["continuity"]
+    assert continuity["exit_state_id"] == "FD-OUTCOME-A"
+    assert continuity["workflow_end_state_id"] == "WF-END-A"
+    assert continuity["handoffs"][0]["exit_state_id"] == "FD-OUTCOME-A"
+    assert continuity["handoffs"][0]["workflow_end_state_id"] == "WF-END-A"
+
+
+def test_explicit_oq_answer_in_workflow_is_synced_before_section_runs(monkeypatch):
+    import agents.ba_agent.router as router
+
+    user_message = "Resolve `OQ-91`: The confirmed answer is to retry with a new token."
+    ctx = MagicMock()
+    ctx.state = {
+        "current_turn": 0,
+        "active_section": SECTION_WORKFLOW,
+        "ticket_type": TICKET_NEW_FEATURE,
+        "artifacts": {},
+        "flags": {},
+        "sections_status": {},
+        "open_questions": [
+            {"id": "OQ-91", "question": "Question?", "severity": "critical", "status": "open"}
+        ],
+    }
+    ctx.user_content = MagicMock()
+    ctx.user_content.parts = [MagicMock(text=user_message)]
+    ctx.run_node = AsyncMock()
+
+    def route_to_workflow(context):
+        context.state["current_turn"] += 1
+        context.route = ROUTE_WF
+        return user_message
+
+    monkeypatch.setattr(router, "route_ba_turn", route_to_workflow)
+
+    asyncio.run(router._sync_explicit_oq_answers_before_section(ctx, user_message))
+
+    question = ctx.state["open_questions"][0]
+    assert question["status"] == "resolved"
+    assert question["sync_status"] == "pending"
+    ctx.run_node.assert_awaited_once()
+
+
+def test_wf_end_state_failure_blocks_section_completion():
+    state = {
+        STATE_ACTIVE_SECTION: SECTION_WORKFLOW,
+        "artifacts": {"feature_definition": {"continuity": {"has_successor": False}}},
+        "flags": {
+            "wf": {
+                "WF-F1": {"status": "PASS"},
+                "WF-F2": {"status": "PASS"},
+                "WF-F4": {"status": "PASS"},
+                "WF-F6": {"status": "FAIL"},
+            }
+        },
+        "sections_status": {},
+        "current_turn": 1,
+    }
+
+    sync_sections_status_from_flags(state)
+
+    assert section_is_complete(state, SECTION_WORKFLOW) is False
+    assert state["sections_status"][SECTION_WORKFLOW] != "completed"
 
 
 def test_wf_f2_pending_with_main_flow():
@@ -748,3 +881,54 @@ def test_uc_f1_still_min_one_story():
     flags = check_uc_flags_logic(ctx)
     assert flags["UC-F1"]["status"] == "PASS"
     assert ctx.state["active_user_story_id"] == "US-01"
+
+
+
+def test_wf_extractor_persists_confirmed_handoff_mapping_without_changing_exit_id():
+    import json
+    from agents.sub_graph.workflow.agent import wf_merge_callback
+
+    content = """
+## Main Flow
+| Step | Actor | Action | BR | Gateway |
+| :--- | :--- | :--- | :--- | :--- |
+| 1 | ACT-USER | Begin | | |
+| 2 | ACT-SYSTEM | Verify | | |
+| 3 | ACT-USER | Finish | | |
+
+## End States
+| ID | Description |
+| :--- | :--- |
+| **ES-01** | Login successful; authenticated session created |
+"""
+    ctx = MagicMock()
+    ctx.state = {
+        "current_turn": 2,
+        "artifacts": {
+            "workflow": {},
+            "feature_definition": {
+                "continuity": {
+                    "has_successor": True,
+                    "handoffs": [{
+                        "exit_state_id": "FD-OUTCOME-A",
+                        "exit_state": "Authenticated session created",
+                    }],
+                }
+            },
+        },
+        "sections_status": {},
+    }
+    response = MagicMock()
+    response.content.parts = [MagicMock(text=json.dumps({
+        "workflow_md_content": content,
+        "handoff_mappings": [{"handoff_index": 1, "workflow_end_state_id": "ES-01"}],
+    }))]
+
+    asyncio.run(wf_merge_callback(ctx, response))
+
+    continuity = ctx.state["artifacts"]["feature_definition"]["continuity"]
+    assert continuity["handoffs"][0]["exit_state_id"] == "FD-OUTCOME-A"
+    assert continuity["handoffs"][0]["workflow_end_state_id"] == "ES-01"
+    assert continuity["workflow_end_state_id"] == "ES-01"
+    flags = check_wf_flags_logic(ctx)
+    assert flags["WF-F6"]["status"] == "PASS"

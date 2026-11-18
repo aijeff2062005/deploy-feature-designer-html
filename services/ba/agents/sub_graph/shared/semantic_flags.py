@@ -6,22 +6,28 @@ return structured JSON and we merge into ``ctx.state['flags']`` in after_model.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from agents.sub_graph.shared.constants import NOT_YET_REASONABLE, PASS
+from agents.sub_graph.shared.constants import (
+    NOT_YET_REASONABLE,
+    PASS,
+    PENDING_SEMANTIC,
+)
+from utils import logging
 from utils.utils import parse_str_to_dict
 
 VALID_SEMANTIC = frozenset({PASS, NOT_YET_REASONABLE})
 
 # Valid empty payload for LlmAgent output_schema early-stop (must be JSON, not prose).
 EMPTY_EVALUATION_JSON = '{"evaluations":[]}'
+logger = logging()
 
 
 class SemanticFlagResult(BaseModel):
     flag_id: str = Field(..., description="e.g. FD-F1, BR-F4, WF-F2")
-    status: str = Field(
+    status: Literal["PASS", "NOT_YET_REASONABLE"] = Field(
         ...,
         description="PASS or NOT_YET_REASONABLE",
     )
@@ -66,9 +72,15 @@ def apply_semantic_flag_evaluations(
     from agents.ba_agent.section_gate import sync_sections_status_from_flags
 
     if not raw_text:
+        logger.error(
+            f"Semantic evaluation for bucket '{flag_bucket}' returned no text."
+        )
         return 0
     parsed = parse_str_to_dict(raw_text)
     if not parsed:
+        logger.error(
+            f"Semantic evaluation for bucket '{flag_bucket}' was not valid JSON."
+        )
         return 0
     try:
         data = SemanticFlagsEvaluation.model_validate(parsed)
@@ -77,17 +89,32 @@ def apply_semantic_flag_evaluations(
             try:
                 data = SemanticFlagsEvaluation.model_validate({"evaluations": parsed})
             except Exception:
+                logger.error(
+                    f"Semantic evaluation for bucket '{flag_bucket}' did not match its schema."
+                )
                 return 0
         else:
+            logger.error(
+                f"Semantic evaluation for bucket '{flag_bucket}' did not match its schema."
+            )
             return 0
 
     all_flags = dict(state.get("flags", {}))
     bucket = dict(all_flags.get(flag_bucket, {}))
+    pending_ids = {
+        flag_id
+        for flag_id, flag in bucket.items()
+        if flag.get("status") == PENDING_SEMANTIC
+    }
     updated = 0
     for item in data.evaluations:
         fid = item.flag_id.strip().upper()
         status = item.status.strip().upper()
-        if status not in VALID_SEMANTIC:
+        if fid not in pending_ids or status not in VALID_SEMANTIC:
+            logger.warning(
+                f"Ignoring semantic evaluation outside pending set or with invalid status: "
+                f"bucket={flag_bucket}, flag_id={fid}, status={status}"
+            )
             continue
         existing = dict(bucket.get(fid, {}))
         existing["status"] = status
@@ -97,4 +124,10 @@ def apply_semantic_flag_evaluations(
     all_flags[flag_bucket] = bucket
     state["flags"] = all_flags
     sync_sections_status_from_flags(state)
+    returned_ids = {item.flag_id.strip().upper() for item in data.evaluations}
+    missing = sorted(pending_ids - returned_ids)
+    if missing:
+        logger.error(
+            f"Semantic evaluation for bucket '{flag_bucket}' omitted pending flags: {missing}"
+        )
     return updated

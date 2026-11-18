@@ -258,6 +258,23 @@ shared/…                                             the same tree without a p
 
 Deleting a session, screen or design system deletes its files; published Assets stay.
 
+**Project Wiki.** Approved BA pages and Designer baselines are versioned Markdown under
+`projects/<project>/wiki/`; the Designer's approved visual contract is also stored as
+`design-system/design-system.json` (plus immutable versioned JSON). Basic Memory indexes
+the Markdown tree and ranks semantic search candidates. PostgreSQL continues to enforce
+Wiki approval/project permissions and keeps workflow/version metadata; Basic Memory hits
+are checked against those records before BA agents receive them. Existing approved BA
+pages can be exported after startup with a dry run first:
+
+```bash
+docker compose exec ba-api python /opt/platform/scripts/migrate_wiki_pages_to_markdown.py --project-id PRJ-AURORA
+docker compose exec ba-api python /opt/platform/scripts/migrate_wiki_pages_to_markdown.py --project-id PRJ-AURORA --apply
+docker compose exec designer-api python /opt/platform/scripts/migrate_designer_wiki_to_files.py --project-id PRJ-AURORA
+docker compose exec designer-api python /opt/platform/scripts/migrate_designer_wiki_to_files.py --project-id PRJ-AURORA --apply
+```
+
+The Basic Memory MCP service is reachable only on the Compose network and has no host port.
+
 **Assets.** Every BA export publishes a versioned BA package and its BPMN. When a design waits
 for the final review, its UI specification and the design files are published as "Chờ duyệt"; the approval
 marks them "Đã duyệt". Designs link to the BA package version they came from, so a newer BA version marks them

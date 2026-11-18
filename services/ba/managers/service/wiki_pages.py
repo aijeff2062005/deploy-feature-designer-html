@@ -1,4 +1,4 @@
-"""Human-only wiki ingest / list / approve / demote / delete / clear on MVP SQLite.
+"""Human-only wiki ingest / list / approve / demote / delete / clear on the Wiki store.
 
 BA and VA read approved pages through ``factory_wiki.store``. This router is
 the write path for humans (upload → draft → approve, demote/delete, clear).
@@ -164,7 +164,7 @@ async def upload_wiki_source(
     actor: str = Form("ba.lead", description="Human actor id for audit"),
     sort_mode: str = Form("auto", description="heuristic | llm | auto | both"),
 ):
-    """Human ingest. Same WikiService / SQLite as the Wiki MVP HTTP UI."""
+    """Human ingest. Same WikiService and PostgreSQL-backed Wiki store as the Wiki UI."""
     if namespace not in {"company", "project"}:
         raise HTTPException(
             status_code=400,
@@ -336,7 +336,7 @@ def clear_wiki_store(
 ):
     """Human-only wipe of wiki.db (pages, sources, blobs) — never BA/ADK files.
 
-    Not a BA/VA tool — wiki.html only. Refuses if the target SQLite contains
+    Not a BA/VA tool — wiki.html only. Refuses if the target Wiki schema contains
     ``ba_packages`` / ADK session tables, and never unlinks those database files.
     """
     if (confirm or "").strip().upper() != CLEAR_CONFIRM_TOKEN:

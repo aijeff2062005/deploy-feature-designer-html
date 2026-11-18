@@ -10,7 +10,7 @@
 
 // Platform: login, project context and read-only mode (must load first).
 import { isEmbedded } from './platform.js';
-import { sendChatMessage, getFeature, getChatHistory, exportFeature, exportAndOpenDesigner, getFeatureDocuments, downloadBpmn, saveTouchpoints } from './api.js';
+import { sendChatMessage, reconcileContinuity, getFeature, getChatHistory, exportFeature, exportAndOpenDesigner, getFeatureWikiPreview, getFeatureDocuments, downloadBpmn, saveTouchpoints } from './api.js';
 import { initColumnResize } from './column-resize.js';
 import { escapeHtml, formatChatMarkdown } from './markdown.js';
 import { destroyBpmnPreview, renderBpmnDiagram, resizeBpmnPreview } from './bpmn-viewer.js';
@@ -52,7 +52,7 @@ const SECTIONS = [
       { id: 'WF-F3', label: 'Exception flows exist', severity: 'warning' },
       { id: 'WF-F4', label: 'Actor consistency', severity: 'blocker' },
       { id: 'WF-F5', label: 'BR references', severity: 'warning' },
-      { id: 'WF-F6', label: 'End states defined', severity: 'warning' },
+      { id: 'WF-F6', label: 'End states defined', severity: 'warning', conditionalRequired: true },
     ],
   },
   {
@@ -92,6 +92,12 @@ const SECTIONS = [
 ];
 
 // ── State ────────────────────────────────────────────────────
+
+SECTIONS[0].flags.push({
+  id: 'FD-F6',
+  label: 'Điểm nối feature tiếp theo',
+  severity: 'blocker',
+});
 
 let activeSectionIndex = 0;
 const activeSectionStorageKey = (id) => `ba.active-section.${id}`;
@@ -158,12 +164,20 @@ function flagVisualTone(flag, rawStatus) {
   return 'warning';
 }
 
+function visibleSectionFlags(sec, flagValues) {
+  const fd = sectionStates.feature_definition?.data || {};
+  return sec.flags
+    .map((flag) => flag.conditionalRequired
+      ? { ...flag, severity: fd.continuity?.has_successor === false ? 'warning' : 'blocker' }
+      : flag);
+}
+
 /** Count flags by visual status so header/sidebar match the grid colors. */
 function flagProgress(sec, flagValues) {
   let pass = 0;
   let warning = 0;
   let fail = 0;
-  sec.flags.forEach((f) => {
+  visibleSectionFlags(sec, flagValues).forEach((f) => {
     const tone = flagVisualTone(f, flagValues[f.id]);
     if (tone === 'pass') pass += 1;
     else if (tone === 'warning') warning += 1;
@@ -173,7 +187,7 @@ function flagProgress(sec, flagValues) {
 }
 
 function formatFlagProgressParts(sec, flagValues) {
-  if (!sec.flags.length) return null;
+  if (!visibleSectionFlags(sec, flagValues).length) return null;
   const p = flagProgress(sec, flagValues);
   return {
     pass: `${p.pass} đạt`,
@@ -1118,6 +1132,7 @@ async function loadSectionHistory(sectionId, initialPitch = '', { refresh = fals
             sender: 'agent',
             text: `Xin chào! Tôi là BA Agent.\n\nBạn đang bắt đầu phân tích feature: "${featureTitle}"\n\nỞ section đầu tiên — Feature Definition — tôi cần bạn cung cấp:\n\n1. Goal: Tại sao feature này cần tồn tại? (business value)\n2. Actors: Ai tham gia vào luồng này? (ít nhất 2)\n3. Scope In: Feature này bao gồm những gì?\n4. Scope Out: Feature này KHÔNG bao gồm những gì?\n\nHãy bắt đầu mô tả cho tôi nhé!`,
           });
+          chatHistories['feature_definition'][chatHistories['feature_definition'].length - 1].text += '\n\nNgoài ra, feature này có kế thừa từ feature đã duyệt trước đó không, và có nhánh nào bàn giao sang feature tiếp theo không? Nếu có, mô tả từng nhánh theo điều kiện và kết quả; BA Agent sẽ hỏi tiếp phần nguồn, đích và phạm vi còn thiếu. Nếu không, xác nhận feature độc lập.';
         }
       } else if (sectionId === 'business_rules') {
         chatHistories[sectionId].push({
@@ -1215,6 +1230,8 @@ async function init() {
   } catch { /* storage may be unavailable */ }
 
   let featureDescription = '';
+  // Reconcile legacy scope before loading flags; no synthetic chat turn.
+  try { await reconcileContinuity(sessionId); } catch (err) { console.warn('Continuity sync:', err); }
   // Try to load existing data from DB
   try {
     const feature = await getFeature(sessionId);
@@ -1299,7 +1316,7 @@ function bindEvents() {
   }
   const btnExportDesigner = document.getElementById('btnExportDesigner');
   if (btnExportDesigner) {
-    btnExportDesigner.addEventListener('click', handleExportAndOpenDesigner);
+    btnExportDesigner.addEventListener('click', openBaWikiApproval);
   }
   const btnExportBpmn = document.getElementById('btnExportBpmn');
   if (btnExportBpmn) {
@@ -1483,7 +1500,8 @@ function renderChecklist() {
 
   checklistGrid.innerHTML = '';
 
-  sec.flags.forEach((flag) => {
+  const visibleFlags = visibleSectionFlags(sec, flagValues);
+  visibleFlags.forEach((flag) => {
     const value = flagStatusOf(flagValues[flag.id]);
     const tone = flagVisualTone(flag, value);
     const isRequired = flag.severity === 'blocker';
@@ -1503,7 +1521,7 @@ function renderChecklist() {
   });
 
   document.getElementById('checkProgressRatio').textContent =
-    sec.flags.length > 0 ? formatFlagProgressCompact(sec, flagValues) : 'N/A';
+    visibleFlags.length > 0 ? formatFlagProgressCompact(sec, flagValues) : 'N/A';
 }
 
 function renderChatMessages() {
@@ -1637,6 +1655,21 @@ function renderWorkspace() {
     const actorsList = data.actors || [];
     const scopeInList = data.scope_in || [];
     const scopeOutList = data.scope_out || [];
+    const continuity = data.continuity || {};
+    const handoffs = Array.isArray(continuity.handoffs) ? continuity.handoffs : [];
+    const incomingHandoffs = Array.isArray(continuity.incoming_handoffs) ? continuity.incoming_handoffs : [];
+    const continuityStatus = (value, positive, negative) => value === true
+      ? positive
+      : value === false
+        ? negative
+        : 'Chưa xác nhận';
+    const legacyRows = [
+      ['Feature tiếp nối', continuity.successor_feature_title || continuity.successor_feature_id],
+      ['Trạng thái bàn giao', continuity.exit_state],
+      ['Feature trước', continuity.predecessor_feature_title || continuity.predecessor_feature_id],
+      ['Điều kiện đầu vào', continuity.entry_state],
+      ['Nguồn đã duyệt', [continuity.predecessor_version, continuity.predecessor_end_state_id].filter(Boolean).join(' · ')],
+    ].filter(([, value]) => value);
 
     const renderChips = (list, field, chipClass) => {
       if (!list || list.length === 0) {
@@ -1680,6 +1713,14 @@ function renderWorkspace() {
           <span class="count-pill">${scopeOutList.length}</span>
         </div>
         ${renderChips(scopeOutList, 'scope_out', 'chip-amber')}
+      </div>
+      <div class="field-group">
+        <label class="field-label">Liên kết giữa các feature</label>
+        <div class="ws-meta-row"><span class="ws-meta-pill">${escapeHtml(continuityStatus(continuity.has_predecessor, 'Có kế thừa', 'Không kế thừa'))}</span><span class="ws-meta-pill">${escapeHtml(continuityStatus(continuity.has_successor, 'Có feature tiếp nối', 'Không có feature tiếp nối'))}</span></div>
+        ${handoffs.length ? handoffs.map((handoff, index) => `<div class="ws-item-card"><div class="ws-item-header"><strong>Nhánh ${index + 1}</strong></div><div class="ws-item-body"><strong>Điều kiện:</strong> ${escapeHtml(handoff.branch_condition || 'Chưa xác nhận')}</div><div class="ws-item-body"><strong>Đích:</strong> ${escapeHtml(handoff.successor_feature_title || handoff.successor_feature_id || 'Chưa xác nhận')}</div><div class="ws-item-body"><strong>End State:</strong> ${escapeHtml(handoff.exit_state || 'Chưa xác nhận')} ${handoff.exit_state_id ? `(${escapeHtml(handoff.exit_state_id)})` : ''}</div><div class="ws-item-body"><strong>Scope chuyển tiếp:</strong> ${escapeHtml((handoff.deferred_scope || []).join(', ') || 'Chưa ghi nhận phạm vi nghiệp vụ thuộc feature tiếp nối')}</div></div>`).join('') : ''}
+        ${incomingHandoffs.length ? incomingHandoffs.map((handoff, index) => `<div class="ws-item-card"><div class="ws-item-header"><strong>Đầu vào ${index + 1}</strong></div><div class="ws-item-body"><strong>Feature nguồn:</strong> ${escapeHtml(handoff.predecessor_feature_title || handoff.predecessor_feature_id || 'Chưa xác nhận')} · v${escapeHtml(handoff.predecessor_version || '?')}</div><div class="ws-item-body"><strong>End State nguồn:</strong> ${escapeHtml(handoff.predecessor_end_state_id || 'Chưa xác nhận')} — ${escapeHtml(handoff.predecessor_end_state || '')}</div><div class="ws-item-body"><strong>Điều kiện đầu vào:</strong> ${escapeHtml(handoff.entry_state || 'Chưa xác nhận')}</div></div>`).join('') : ''}
+        ${!handoffs.length && !incomingHandoffs.length && legacyRows.length ? `<div class="ws-item-card">${legacyRows.map(([label, value]) => `<div class="ws-item-body"><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</div>`).join('')}</div>` : ''}
+        ${Array.isArray(continuity.deferred_scope) && continuity.deferred_scope.length ? `<div class="ws-item-body">Phạm vi chuyển tiếp: ${escapeHtml(continuity.deferred_scope.join(', '))}</div>` : ''}
       </div>
     `;
 
@@ -1896,11 +1937,12 @@ async function handleExport() {
   }
 }
 
-async function handleExportAndOpenDesigner() {
+async function handleExportAndOpenDesigner(options = {}) {
   if (isSending) return;
   const exportOk = featureStatus === 'VALIDATED' || (featureStatus === 'EXPORTED' && lastValidationPassed());
   if (!exportOk) return;
   const btn = document.getElementById('btnExportDesigner');
+  let handoffCompleted = false;
   if (btn) {
     btn.disabled = true;
     btn.textContent = 'Opening Designer...';
@@ -1911,7 +1953,8 @@ async function handleExportAndOpenDesigner() {
   // opened after the async handoff request has started.
   const designerWindow = embedded ? null : window.open('about:blank', 'designer-agent');
   try {
-    const result = await exportAndOpenDesigner(sessionId);
+    const result = await exportAndOpenDesigner(sessionId, options);
+    handoffCompleted = true;
     featureStatus = 'EXPORTED';
     packageExported = true;
     const sec = SECTIONS[activeSectionIndex];
@@ -1943,9 +1986,87 @@ async function handleExportAndOpenDesigner() {
     });
     renderChatMessages();
   } finally {
-    if (btn) btn.textContent = 'Export & Open in Designer';
+    if (btn) btn.textContent = handoffCompleted ? 'Đã bàn giao · mở Designer' : 'Bàn giao & mở Designer';
     syncControlButtons();
+    if (btn && handoffCompleted) btn.disabled = true;
   }
+}
+
+function baWikiPreviewDocuments(preview, feature) {
+  return Array.isArray(preview?.files) ? preview.files.map((file) => {
+    return {
+      ...file,
+      displayName: file.path || file.description,
+    };
+  }) : [];
+}
+
+function renderBaWikiPreview(content) {
+  return formatChatMarkdown(String(content || '').replace(/<!--[\s\S]*?-->/g, ''));
+}
+
+async function openBaWikiApproval() {
+  if (isSending || !sessionId) return;
+  const trigger = document.getElementById('btnExportDesigner');
+  const triggerLabel = trigger?.textContent || '';
+  if (trigger) { trigger.disabled = true; trigger.textContent = 'Đang tải nội dung Wiki…'; }
+  let feature;
+  let wikiPreview;
+  try {
+    const [featureResult, previewResult] = await Promise.all([
+      getFeature(sessionId),
+      getFeatureWikiPreview(sessionId),
+    ]);
+    feature = featureResult;
+    wikiPreview = previewResult;
+  } catch (err) {
+    window.alert(`Không tải được nội dung BA để xem trước: ${err.message}`);
+    if (trigger) { trigger.textContent = triggerLabel; syncControlButtons(); }
+    return;
+  }
+  if (trigger) { trigger.textContent = triggerLabel; syncControlButtons(); }
+  const files = baWikiPreviewDocuments(wikiPreview, feature);
+  let active = 0;
+  const overlay = document.createElement('div');
+  overlay.className = 'wiki-approval-overlay';
+  overlay.innerHTML = `
+    <section class="wiki-approval-dialog" role="dialog" aria-modal="true" aria-label="Chốt BA và xác nhận nội dung vào Wiki">
+      <header class="wiki-approval-head"><div><h2>Chốt BA · Xác nhận nội dung vào Wiki</h2><p>Chỉ nội dung đã duyệt mới được ghi vào Wiki Project và lập chỉ mục.</p></div><button type="button" class="wiki-approval-close" aria-label="Đóng">×</button></header>
+      <div class="wiki-approval-source"><strong>${escapeHtml(feature?.title || featureTitle || 'BA package')}</strong><span>BA package · ${escapeHtml(feature?.feature_status || 'VALIDATED')} · nguồn tham chiếu</span><b>Đã kiểm tra</b></div>
+      <div class="wiki-approval-layout"><nav class="wiki-approval-files" aria-label="Các file sẽ lưu">${files.map((file, i) => `<button type="button" class="wiki-approval-file${i === 0 ? ' is-active' : ''}" data-file-index="${i}"><strong>${escapeHtml(file.displayName)}</strong><span>${escapeHtml(file.description)}</span></button>`).join('')}</nav><section class="wiki-approval-preview"><div class="wiki-approval-preview-title" id="baWikiPreviewTitle"></div><label class="wiki-approval-description-label" id="baWikiDescriptionLabel" hidden>Mô tả project <textarea id="baWikiProjectDescription" rows="3"></textarea></label><div class="wiki-approval-markdown" id="baWikiPreviewBody"></div></section></div>
+      <footer class="wiki-approval-footer"><span>README.md + trang feature · Basic Memory index sau khi duyệt.</span><div><button type="button" class="wiki-approval-cancel">Để sau</button><button type="button" class="wiki-approval-confirm">Duyệt &amp; lưu README + feature, rồi bàn giao Designer</button></div></footer>
+      <p class="wiki-approval-error" role="alert" hidden></p>
+    </section>`;
+  document.body.appendChild(overlay);
+  const titleEl = overlay.querySelector('#baWikiPreviewTitle');
+  const bodyEl = overlay.querySelector('#baWikiPreviewBody');
+  const descriptionLabel = overlay.querySelector('#baWikiDescriptionLabel');
+  const descriptionInput = overlay.querySelector('#baWikiProjectDescription');
+  descriptionInput.value = wikiPreview.project_description || '';
+  const originalProjectDescription = descriptionInput.value;
+  descriptionInput.addEventListener('input', () => {
+    if (files[active]?.path === 'README.md') {
+      bodyEl.innerHTML = renderBaWikiPreview(files[active].content.replace(originalProjectDescription, descriptionInput.value));
+    }
+  });
+  const showFile = (index) => {
+    active = index;
+    titleEl.textContent = files[index].displayName;
+    bodyEl.innerHTML = renderBaWikiPreview(files[index].content);
+    descriptionLabel.hidden = files[index].path !== 'README.md';
+    overlay.querySelectorAll('.wiki-approval-file').forEach((button, i) => button.classList.toggle('is-active', i === index));
+  };
+  showFile(active);
+  overlay.querySelectorAll('[data-file-index]').forEach((button) => button.addEventListener('click', () => showFile(Number(button.dataset.fileIndex))));
+  const close = () => overlay.remove();
+  overlay.querySelector('.wiki-approval-close').addEventListener('click', close);
+  overlay.querySelector('.wiki-approval-cancel').addEventListener('click', close);
+  overlay.addEventListener('click', (event) => { if (event.target === overlay) close(); });
+  overlay.querySelector('.wiki-approval-confirm').addEventListener('click', async (event) => {
+    const options = { project_description: descriptionInput.value };
+    close();
+    await handleExportAndOpenDesigner(options);
+  });
 }
 
 async function handleExportBpmn() {

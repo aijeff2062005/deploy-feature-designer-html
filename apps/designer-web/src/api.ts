@@ -70,6 +70,20 @@ function fileAsBase64(file: File): Promise<string> {
 const projectQuery = () => (projectId ? `?project_id=${encodeURIComponent(projectId)}` : "");
 
 export const api = {
+    getProjectWiki: (projectId: string) =>
+        request<ProjectWikiResponse>(`/project-wiki?project_id=${encodeURIComponent(projectId)}`),
+    projectWikiPreview: (runId: string) =>
+        request<{ run_id: string; revision: number; project_id: string; version: number; approved_at: string;
+            files: { path: string; content: string; screen_name?: string; platform?: string }[] }>(
+            `/runs/${runId}/project-wiki-preview`,
+        ),
+    restoreProjectWiki: (projectId: string, version: number) =>
+        request<{ project_id: string; restored_from: number; version: number }>(
+            `/project-wiki/restore?project_id=${encodeURIComponent(projectId)}`,
+            { method: "POST", body: JSON.stringify({ version }) },
+        ),
+    createStylePreviews: (sessionId: string) =>
+        request<Run>(`/sessions/${sessionId}/style-previews`, { method: "POST" }),
     parseAttachment: async (file: File) =>
         request<ParsedAttachment>(`/attachments/parse${projectQuery()}`, {
             method: "POST",
@@ -190,6 +204,20 @@ export const api = {
         }),
     hulyAttachmentPreview: (sessionId: string, runId: string) =>
         request<import("./types").HulyAttachmentPreview>(`/sessions/${sessionId}/huly/preview?run_id=${encodeURIComponent(runId)}`),
+};
+
+export type ProjectWikiVersion = {
+    version: number;
+    baseline: Record<string, unknown>;
+    source_session_id: string;
+    source_feature_id: string | null;
+    updated_at: string;
+};
+
+export type ProjectWikiResponse = {
+    project_id: string;
+    current: ProjectWikiVersion | null;
+    versions: ProjectWikiVersion[];
 };
 
 /** URL of the design page (canvas) for a session; one browser tab per session. */

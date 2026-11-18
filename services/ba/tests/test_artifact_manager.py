@@ -18,8 +18,8 @@ def test_merge_feature_definition_data() -> None:
 
     delta = FeatureDefinitionData(
         goal="",  # Rỗng -> không đè goal cũ
-        actors=["Customer", "Payment Gateway"],  # Customer đã có -> dedup
-        scope_in=["Thanh toán QR", "Thanh toán Ví điện tử"],  # Full danh sách mới sau khi gộp
+        actors=["Customer", "Payment Gateway"],  # Full danh sách mới
+        scope_in=["Thanh toán QR", "Thanh toán Ví điện tử"],  # Full danh sách mới
         scope_out=[],
     )
 
@@ -31,15 +31,14 @@ def test_merge_feature_definition_data() -> None:
         "ACT-PAYMENT-GATEWAY: Payment Gateway",
     ]
     assert merged.scope_in == ["Thanh toán QR", "Thanh toán Ví điện tử"]
-    assert merged.scope_out == ["Thanh toán tiền mặt"]
+    assert merged.scope_out == []
 
-    # Partial delta must not wipe existing actors/scopes
+    # Omitted lists preserve current values; supplied lists replace them.
     partial = merge_feature_definition_data(
         merged,
         FeatureDefinitionData(goal=None, actors=["ACT-ADMIN: Admin"], scope_in=None),
     )
-    assert "ACT-CUSTOMER: Customer" in partial.actors
-    assert "ACT-ADMIN: Admin" in partial.actors
+    assert partial.actors == ["ACT-ADMIN: Admin"]
     assert partial.scope_in == merged.scope_in
 
 

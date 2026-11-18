@@ -28,6 +28,7 @@ def build_structured_content(
     schema_json: str,
     *,
     image_bytes: bytes | None = None,
+    images: list[bytes] | None = None,
     image_mime_type: str = "image/jpeg",
 ) -> types.Content:
     parts = [
@@ -39,8 +40,9 @@ def build_structured_content(
             )
         )
     ]
-    if image_bytes:
-        parts.append(types.Part.from_bytes(data=image_bytes, mime_type=image_mime_type))
+    for image in ([image_bytes] if image_bytes else []) + (images or []):
+        if image:
+            parts.append(types.Part.from_bytes(data=image, mime_type=image_mime_type))
     return types.Content(role="user", parts=parts)
 
 
@@ -246,6 +248,7 @@ class AdkProvider:
         prompt: str,
         schema: type[ModelT],
         image_bytes: bytes | None = None,
+        images: list[bytes] | None = None,
         image_mime_type: str = "image/jpeg",
         max_attempts: int = 3,
         model: str | None = None,
@@ -263,6 +266,7 @@ class AdkProvider:
                         prompt + correction,
                         json.dumps(schema.model_json_schema(), ensure_ascii=False),
                         image_bytes=image_bytes,
+                        images=images,
                         image_mime_type=image_mime_type,
                     ),
                     max_turns=1,

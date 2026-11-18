@@ -30,7 +30,7 @@ Keep the product screen a normal app screen at its approved platform and viewpor
 
 User-selected visual direction: {{style_selection}}
 Selected visual contract (authoritative for preview and final screens): {{visual_contract}}
-Apply this contract consistently across screens. Preserve its exact palette, font pair, radius, density, composition language, surfaces, and shape language unless an imported design system is authoritative. Do not substitute a different style from the product profile when the user selected a style.
+Apply this contract consistently across screens. Preserve its exact palette, font pair, radius, density, composition language, surfaces, shape language, and `background_treatment` unless an imported design system is authoritative. Do not substitute a different style from the product profile when the user selected a style.
 For each screen, set `visual_asset_role` to `hero` or `background` only when the selected local illustration supports that task; otherwise set `none`. The selected illustration is decorative and must never replace the wordmark. Use only user-provided assets or selected local illustrations; never source external photos or remote image URLs.
 
 Design system: {{design_system}}

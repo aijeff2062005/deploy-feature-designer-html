@@ -19,19 +19,44 @@ from agents.sub_graph.shared.semantic_flags import (
     SemanticFlagsEvaluation,
     apply_semantic_flag_evaluations,
 )
+from agents.sub_graph.shared.constants import PENDING_SEMANTIC
 from config.model_config import base_model
+from utils import logging
 
 from .callback import fd_flags_checker_before_model
+
+logger = logging()
 
 
 async def fd_flags_after_model(
     callback_context: CallbackContext,
     llm_response: LlmResponse,
 ) -> None:
-    text = ""
-    if llm_response.content and llm_response.content.parts:
-        text = llm_response.content.parts[0].text or ""
-    apply_semantic_flag_evaluations(callback_context.state, "fd", text)
+    parts = llm_response.content.parts if llm_response.content else []
+    text = "\n".join(part.text for part in parts if part.text)
+    flags = callback_context.state.get("flags", {}).get("fd", {})
+    pending_before = {
+        flag_id
+        for flag_id, flag in flags.items()
+        if flag.get("status") == PENDING_SEMANTIC
+    }
+    updated = apply_semantic_flag_evaluations(callback_context.state, "fd", text)
+    flags_after = callback_context.state.get("flags", {}).get("fd", {})
+    unresolved = sorted(
+        flag_id
+        for flag_id in pending_before
+        if flags_after.get(flag_id, {}).get("status") == PENDING_SEMANTIC
+    )
+    if unresolved:
+        logger.error(
+            "fd_flags_after_model: Semantic evaluation did not resolve pending flags "
+            f"{unresolved}; parsed updates={updated}, response_text_present={bool(text)}"
+        )
+    else:
+        logger.info(
+            f"fd_flags_after_model: Applied {updated} semantic evaluation(s) "
+            f"for pending flags {sorted(pending_before)}"
+        )
 
 
 def create_fd_flags_checker_node():
@@ -40,15 +65,6 @@ def create_fd_flags_checker_node():
     instruction = (
         prompt_path.read_text(encoding="utf-8") if prompt_path.exists() else ""
     )
-    # Prefer structured JSON over tool calls (gate does not support tool_choice=auto).
-    instruction = (
-        instruction
-        + "\n\n# OUTPUT\n"
-        "Trả về JSON đúng schema SemanticFlagsEvaluation: "
-        '{"evaluations":[{"flag_id":"FD-F1","status":"PASS|NOT_YET_REASONABLE","detail":null}]}. '
-        "KHÔNG gọi tool. Đánh giá MỌI flag trong PENDING SEMANTIC FLAGS."
-    )
-
     return LlmAgent(
         name="fd_flags_checker",
         model=base_model,

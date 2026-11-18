@@ -26,17 +26,22 @@ SECTION_FLAG_KEYS: dict[str, str] = {
 WARNING_FLAGS: dict[str, frozenset[str]] = {
     "fd": frozenset({"FD-F4"}),
     "br": frozenset({"BR-F2", "BR-F3", "BR-F5"}),
-    "wf": frozenset({"WF-F3", "WF-F5", "WF-F6"}),
+    "wf": frozenset({"WF-F3", "WF-F5"}),
     "uc": frozenset({"UC-F4", "UC-F6"}),
 }
 
 # Every blocker must be present and non-blocking. Missing == incomplete.
 REQUIRED_BLOCKERS: dict[str, frozenset[str]] = {
-    "fd": frozenset({"FD-F1", "FD-F2", "FD-F3", "FD-F5"}),
+    "fd": frozenset({"FD-F1", "FD-F2", "FD-F3", "FD-F5", "FD-F6"}),
     "br": frozenset({"BR-F1", "BR-F4"}),
-    "wf": frozenset({"WF-F1", "WF-F2", "WF-F4"}),
+    "wf": frozenset({"WF-F1", "WF-F2", "WF-F4", "WF-F6"}),
     "uc": frozenset({"UC-F1", "UC-F2", "UC-F3", "UC-F5", "UC-F7", "UC-F8"}),
 }
+
+
+def required_blockers_for_state(state: dict[str, Any], flag_key: str) -> frozenset[str]:
+    """Return the complete set of required checks for a section."""
+    return REQUIRED_BLOCKERS.get(flag_key, frozenset())
 
 
 def section_blockers_open(state: dict[str, Any], section_id: str) -> bool:
@@ -67,7 +72,7 @@ def section_is_complete(state: dict[str, Any], section_id: str) -> bool:
     section_flags = state.get("flags", {}).get(flag_key, {})
     if not section_flags:
         return False
-    required = REQUIRED_BLOCKERS.get(flag_key, frozenset())
+    required = required_blockers_for_state(state, flag_key)
     for flag_id in required:
         info = section_flags.get(flag_id)
         if not info:
@@ -152,6 +157,22 @@ def record_package_change_review(state: dict[str, Any], edited_section: str) -> 
     failed, warnings, passed = run_cross_section_checks(review_state)
     if schema_blocked:
         failed = list(schema_blocked.get("failed_checks") or []) + failed
+    flag_key = SECTION_FLAG_KEYS.get(edited_section)
+    if flag_key:
+        section_flags = (review_state.get("flags") or {}).get(flag_key) or {}
+        for flag_id in sorted(required_blockers_for_state(review_state, flag_key)):
+            info = section_flags.get(flag_id) or {}
+            status = str(info.get("status") or "MISSING").upper()
+            if status != PASS:
+                failed.append(
+                    {
+                        "check_id": flag_id,
+                        "name": info.get("name") or "Required section condition",
+                        "detail": info.get("detail") or f"Required condition is {status}.",
+                        "affected_sections": [edited_section],
+                        "suggestion": "Complete the missing section condition before handoff.",
+                    }
+                )
     for question in state.get("open_questions") or []:
         critical_open = (
             str(question.get("severity") or "").lower() == "critical"

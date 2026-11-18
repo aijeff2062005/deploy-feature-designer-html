@@ -14,6 +14,7 @@ from agents.sub_graph.shared.constants import (
     WARNING,
 )
 from agents.sub_graph.shared.flag_helpers import apply_not_yet_reset, flag_dict, was_passed
+from managers.control.bpmn import parse_workflow_steps
 
 
 def check_wf_flags_logic(ctx) -> dict[str, Any]:
@@ -22,7 +23,8 @@ def check_wf_flags_logic(ctx) -> dict[str, Any]:
     existing = dict(ctx.state.get("flags", {}).get("wf", {}))
     flags: dict[str, Any] = {}
     has_content = bool(content.strip())
-    steps = _count_main_flow_steps(content)
+    parsed = parse_workflow_steps(content)
+    steps = len(parsed.get("steps") or [])
 
     # WF-F1: Main flow ≥3 steps (blocker) — code count, sticky PASS
     if not has_content:
@@ -78,7 +80,18 @@ def check_wf_flags_logic(ctx) -> dict[str, Any]:
         )
 
     # WF-F5: BR references (warning)
-    if re.search(r"BR-\d+", content):
+    rules = (ctx.state.get("artifacts") or {}).get("business_rules") or []
+    known_rule_ids = {
+        str(rule.get("id") or "").strip().casefold()
+        for rule in rules
+        if isinstance(rule, dict) and str(rule.get("id") or "").strip()
+    }
+    referenced_rule_ids = {
+        reference.strip().casefold()
+        for step in parsed.get("steps") or []
+        for reference in re.findall(r"[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+", step.get("br_ref") or "")
+    }
+    if referenced_rule_ids and (not known_rule_ids or referenced_rule_ids & known_rule_ids):
         flags["WF-F5"] = flag_dict(5, "BR references", PASS)
     elif has_content:
         flags["WF-F5"] = flag_dict(
@@ -87,8 +100,74 @@ def check_wf_flags_logic(ctx) -> dict[str, Any]:
     else:
         flags["WF-F5"] = flag_dict(5, "BR references", WARNING)
 
-    # WF-F6: End states (warning)
-    if "end state" in content.lower() or "## end states" in content.lower():
+    fd = (ctx.state.get("artifacts") or {}).get("feature_definition") or {}
+    continuity = fd.get("continuity") or {}
+    handoffs = continuity.get("handoffs") or [] if isinstance(continuity, dict) else []
+    if isinstance(continuity, dict) and continuity.get("has_successor") is True:
+        if not handoffs and continuity.get("exit_state"):
+            handoffs = [{
+                "branch_condition": continuity.get("exit_state"),
+                "exit_state": continuity.get("exit_state"),
+                "exit_state_id": continuity.get("exit_state_id"),
+                "workflow_end_state_id": continuity.get("workflow_end_state_id"),
+            }]
+        state_labels = parsed.get("end_states") or []
+        state_ids = parsed.get("end_state_ids") or []
+        matched_ids = []
+        unmatched = []
+        for index, handoff in enumerate(handoffs, start=1):
+            mapped_workflow_id = handoff.get("workflow_end_state_id")
+            mapped_ids = [mapped_workflow_id]
+            if len(handoffs) == 1:
+                # Older artifacts can retain a stale per-handoff mapping after
+                # the top-level mapping was corrected. Try both, accepting
+                # only IDs that resolve uniquely in this workflow.
+                mapped_ids.append(continuity.get("workflow_end_state_id"))
+            matches = []
+            for candidate in mapped_ids:
+                workflow_end_state_id = re.sub(
+                    r"^[*_`]+|[*_`]+$", "", str(candidate or "").strip()
+                ).strip()
+                if not workflow_end_state_id:
+                    continue
+                candidate_matches = [
+                    row for row, state_id in enumerate(state_ids)
+                    if str(state_id).strip().casefold() == workflow_end_state_id.casefold()
+                ]
+                if len(candidate_matches) == 1:
+                    matches = candidate_matches
+                    break
+
+            if not matches:
+                expected = _normalized_text(handoff.get("exit_state") or "")
+                normalized_labels = [_normalized_text(label) for label in state_labels]
+                matches = [
+                    row for row, label in enumerate(normalized_labels)
+                    if expected and expected in label
+                ]
+            if len(matches) != 1 or len(state_ids) != len(state_labels):
+                unmatched.append(str(index))
+                continue
+            row = matches[0]
+            state_id = state_ids[row]
+            handoff["workflow_end_state_id"] = state_id
+            matched_ids.append(state_id)
+        if not handoffs or unmatched or len(matched_ids) != len(set(matched_ids)):
+            detail = (
+                "Cần một End State có mã, khớp duy nhất cho từng nhánh bàn giao; "
+                "kiểm tra các nhánh: " + (", ".join(unmatched) if unmatched else "mã End State bị dùng lặp") + "."
+            )
+            flags["WF-F6"] = flag_dict(
+                6, "End states match handoffs", MISSING_VALUE if not state_ids else FAIL, detail
+            )
+        else:
+            continuity["handoffs"] = handoffs
+            if len(handoffs) == 1:
+                continuity["workflow_end_state_id"] = handoffs[0]["workflow_end_state_id"]
+            fd["continuity"] = continuity
+            ctx.state["artifacts"] = {**(ctx.state.get("artifacts") or {}), "feature_definition": fd}
+            flags["WF-F6"] = flag_dict(6, "End states match handoffs", PASS)
+    elif parsed.get("end_states"):
         flags["WF-F6"] = flag_dict(6, "End states defined", PASS)
     elif has_content:
         flags["WF-F6"] = flag_dict(
@@ -96,7 +175,6 @@ def check_wf_flags_logic(ctx) -> dict[str, Any]:
         )
     else:
         flags["WF-F6"] = flag_dict(6, "End states defined", WARNING)
-
     apply_not_yet_reset(flags, existing)
 
     all_flags = dict(ctx.state.get("flags", {}))
@@ -104,6 +182,10 @@ def check_wf_flags_logic(ctx) -> dict[str, Any]:
     ctx.state["flags"] = all_flags
     sync_sections_status_from_flags(ctx.state)
     return flags
+
+
+def _normalized_text(value: Any) -> str:
+    return " ".join(re.sub(r"[^\w]+", " ", str(value or "").casefold()).split())
 
 
 def _main_flow_section(content: str) -> str:
@@ -127,25 +209,5 @@ def _main_flow_section(content: str) -> str:
 
 
 def _count_main_flow_steps(content: str) -> int:
-    """Count Main Flow steps from a markdown table or a numbered/bulleted list."""
-    section = _main_flow_section(content)
-    table_rows = 0
-    list_rows = 0
-    for raw in section.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if line.startswith("|"):
-            cells = [c.strip() for c in line.strip("|").split("|")]
-            if not cells or re.match(r"^-+$", cells[0] or ""):
-                continue
-            header = " ".join(cells).lower()
-            if header.startswith("step") or set(header.replace(" ", "")) <= {"-"}:
-                continue
-            table_rows += 1
-            continue
-        if re.match(r"^\d+[.)]\s+\S", line):
-            list_rows += 1
-        elif re.match(r"^[-*•]\s+\S", line):
-            list_rows += 1
-    return max(table_rows, list_rows)
+    """Count Main Flow steps with the canonical workflow parser."""
+    return len(parse_workflow_steps(content).get("steps") or [])

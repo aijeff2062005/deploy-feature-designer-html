@@ -18,6 +18,7 @@ const KIND_ICON: Record<ProjectFileKind, typeof FileJson> = {
     ui_spec: FileJson,
     designer_output: Layers,
     wiki_source: BookOpen,
+    project_design_wiki: BookOpen,
 };
 
 type Filter = "all" | ProjectFileKind;
@@ -28,10 +29,11 @@ const FILTERS: { id: Filter; label: string }[] = [
     { id: "bpmn", label: "BPMN" },
     { id: "ui_spec", label: "UI spec" },
     { id: "wiki_source", label: "Wiki" },
+    { id: "project_design_wiki", label: "Wiki thiết kế" },
     { id: "designer_output", label: "Thiết kế" },
 ];
 
-export function ProjectFilesPanel({ onShowWorkbench }: { onShowWorkbench: () => void }) {
+export function ProjectFilesPanel({ onShowWorkbench, onShowWiki }: { onShowWorkbench: () => void; onShowWiki: () => void }) {
     const [files, setFiles] = useState<ProjectFile[] | null>(null);
     const [error, setError] = useState("");
     const [query, setQuery] = useState("");
@@ -63,6 +65,9 @@ export function ProjectFilesPanel({ onShowWorkbench }: { onShowWorkbench: () => 
                     </button>
                     <button className="panel-switch" type="button" onClick={onShowWorkbench}>
                         Workbench
+                    </button>
+                    <button className="panel-switch" type="button" onClick={onShowWiki}>
+                        Wiki thiết kế
                     </button>
                 </div>
             </header>

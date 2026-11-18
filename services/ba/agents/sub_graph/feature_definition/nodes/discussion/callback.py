@@ -53,6 +53,12 @@ PRIORITY_RULES = (
         False,
         "Nên bổ sung các chức năng không thực hiện (Scope Out) để tránh scope creep.",
     ),
+    (
+        "FD-F6",
+        "continuity",
+        True,
+        "Cần xác nhận feature tiếp nối, trạng thái bàn giao và phạm vi được chuyển tiếp.",
+    ),
 )
 
 
@@ -101,6 +107,7 @@ async def fd_discussion_inject_callback(
         "actors": artifacts.get("actors") or [],
         "scope_in": artifacts.get("scope_in") or [],
         "scope_out": artifacts.get("scope_out") or [],
+        "continuity": artifacts.get("continuity") or {},
     }
 
     context_blocks = [
@@ -136,9 +143,9 @@ async def oq_sync_report_after(
     lines = ["\n\n**Đồng bộ sau khi chốt Open Question:**"]
     if pending:
         lines.append(
-            "Chưa đồng bộ xong các phần liên quan cho "
+            "Câu trả lời đã được ghi nhận, nhưng hệ thống chưa đồng bộ xong artifact liên quan cho "
             + ", ".join(f"`{item}`" for item in pending)
-            + "; chưa nên Validate. Cần làm rõ hoặc hoàn tất các cập nhật bên dưới."
+            + ". Đây là trạng thái đồng bộ nội bộ; không cần trả lời lại hoặc xác nhận lại quyết định đã chốt."
         )
         oq_by_id = {
             str(item.get("id") or "").upper(): item

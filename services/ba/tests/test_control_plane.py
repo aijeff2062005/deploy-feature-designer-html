@@ -52,9 +52,9 @@ def sqlite_sync_db():
 
 
 def test_required_blockers_cover_tier1():
-    assert REQUIRED_BLOCKERS["fd"] == frozenset({"FD-F1", "FD-F2", "FD-F3", "FD-F5"})
+    assert REQUIRED_BLOCKERS["fd"] == frozenset({"FD-F1", "FD-F2", "FD-F3", "FD-F5", "FD-F6"})
     assert REQUIRED_BLOCKERS["br"] == frozenset({"BR-F1", "BR-F4"})
-    assert REQUIRED_BLOCKERS["wf"] == frozenset({"WF-F1", "WF-F2", "WF-F4"})
+    assert REQUIRED_BLOCKERS["wf"] == frozenset({"WF-F1", "WF-F2", "WF-F4", "WF-F6"})
     assert REQUIRED_BLOCKERS["uc"] == frozenset(
         {"UC-F1", "UC-F2", "UC-F3", "UC-F5", "UC-F7", "UC-F8"}
     )

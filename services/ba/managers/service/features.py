@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Body, HTTPException, Query
 from fastapi.responses import Response
 from platform_core.fastapi import auth_disabled
 
@@ -65,7 +65,12 @@ from managers.service.schema import (
     WikiValidationSummary,
 )
 from managers.service.access import BA_ROLE, current_username, require_project
-from managers.service.assets import publish_ba_package
+from managers.service.assets import (
+    build_ba_feature_body,
+    build_project_readme,
+    feature_markdown_path,
+    publish_ba_package,
+)
 from managers.service.state_helpers import is_user_facing_author
 from managers.service.wiki_validation_status import (
     annotate_document_hit,
@@ -293,6 +298,13 @@ async def get_feature(session_id: str):
         db.close()
 
 
+@router.post("/{session_id}/reconcile-continuity")
+async def reconcile_feature_continuity(session_id: str):
+    from managers.service.continuity_sync import reconcile_continuity
+
+    return await reconcile_continuity(session_id)
+
+
 @router.delete("/{session_id}", status_code=204)
 async def delete_feature(session_id: str):
     """Hard-delete a BA feature regardless of status (including EXPORTED / completed)."""
@@ -324,25 +336,76 @@ async def export_feature(session_id: str):
     finally:
         db.close()
     envelope = await export_validated_package(session_id, user_id=USER_ID)
-    _publish_assets(session_id, envelope)
+    _publish_assets(session_id, envelope, sync_project_wiki=False)
     return envelope
 
 
-def _publish_assets(session_id: str, envelope: dict) -> None:
+@router.get("/{session_id}/wiki-preview")
+async def preview_project_wiki(session_id: str):
+    """Read-only preview of the README update and feature page for BA approval."""
+    feature = await get_feature(session_id)
+    if feature.feature_status not in {"VALIDATED", "EXPORTED"}:
+        raise HTTPException(status_code=409, detail="Wiki preview requires a validated BA package")
+    project_id = feature.project_id
+    if not project_id:
+        raise HTTPException(status_code=409, detail="Project Wiki requires a project_id")
+    if not auth_disabled() or project_id:
+        require_project(project_id, BA_ROLE)
+    safe_id = str(feature.session_id).replace("/", "-")
+    sections = {key: value.data or {} for key, value in feature.sections.items()}
+    feature_path = feature_markdown_path(project_id, feature.title, safe_id)
+    readme = build_project_readme(
+        project_id, safe_id, feature.title, feature.description, "pending-on-approval", 1,
+        current_username(default=None), sections,
+    )
+    readme_parts = readme.split("---", 2)
+    readme_body = readme_parts[2].lstrip() if len(readme_parts) == 3 else readme
+    import yaml
+    readme_metadata = yaml.safe_load(readme_parts[1]) if len(readme_parts) == 3 else {}
+    feature_body = build_ba_feature_body(
+        feature.title, feature.description, safe_id, 1, "pending-on-approval", "assigned-on-handoff", sections,
+        package_payload={
+            "open_questions": feature.open_questions,
+            "assumptions": feature.assumptions,
+        },
+    )
+    return {
+        "project_id": project_id,
+        "feature_id": safe_id,
+        "project_description": (readme_metadata or {}).get("project_description", ""),
+        "project_description_source": (readme_metadata or {}).get("project_description_source", ""),
+        "files": [
+            {"path": "README.md", "content": readme_body,
+                "description": "Mô tả project và danh sách feature đã duyệt"},
+            {"path": feature_path, "content": feature_body,
+                "description": "Nội dung BA riêng của feature đã duyệt"},
+        ],
+    }
+
+
+def _publish_assets(session_id: str, envelope: dict, *, sync_project_wiki: bool = True, required: bool = False,
+                    project_description_override: str | None = None) -> None:
     """Platform: every export becomes a versioned ba_package in project Assets."""
     try:
-        publish_ba_package(session_id, envelope, current_username(default=None))
+        publish_ba_package(
+            session_id, envelope, current_username(default=None), sync_project_wiki=sync_project_wiki,
+            project_description_override=project_description_override,
+        )
     except Exception:  # noqa: BLE001 — Assets must never block the BA export
         logger.exception("Publishing BA package %s to Assets failed", session_id)
+        if required:
+            raise
 
 
 @router.post("/{session_id}/designer-handoff")
-async def designer_handoff(session_id: str):
+async def designer_handoff(session_id: str, body: dict = Body(default={})):
     """Export the validated package and explicitly hand it to Designer."""
     if not settings.designer_enabled:
         raise HTTPException(status_code=503, detail="Designer handoff is disabled")
     envelope = await export_validated_package(session_id, user_id=USER_ID)
-    _publish_assets(session_id, envelope)
+    description_override = body.get("project_description") if isinstance(body, dict) else None
+    _publish_assets(session_id, envelope, sync_project_wiki=True, required=True,
+                    project_description_override=description_override)
     correlation_id = str(envelope.get("correlation_id") or session_id)
     db = _get_db()
     record = None

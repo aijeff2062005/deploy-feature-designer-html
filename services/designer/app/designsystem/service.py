@@ -38,7 +38,13 @@ async def design_context(store, session: SessionView | None) -> DesignContext:
     ds = await store.get_design_system(ds_id)
     if ds is None or ds.status != "ready":
         return DEFAULT_CONTEXT
-    return DesignContext(ds.id, ds.name, ds.theme_css, ds.fonts, ds.components)
+    # An imported component library and the project's approved visual baseline
+    # are separate inputs. Keep the components, but let the current feature's
+    # approved art direction override the imported palette tokens.
+    theme = (session.visual_theme if session else None) or {}
+    theme_css = ds.theme_css + (theme.get("css") or "")
+    fonts = list(dict.fromkeys([*(ds.fonts or []), *(theme.get("fonts") or [])]))
+    return DesignContext(ds.id, ds.name, theme_css, fonts, ds.components)
 
 
 async def run_import(store, ds_id: str, data: bytes, name: str) -> None:

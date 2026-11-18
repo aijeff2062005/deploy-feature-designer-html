@@ -138,6 +138,74 @@ def check_fd_flags_logic(ctx) -> dict[str, Any]:
                 f"check_fd_flags_logic: Reset {f_id} from NOT_YET_REASONABLE → PENDING_SEMANTIC"
             )
 
+    continuity = fd.get("continuity") or {}
+    missing = []
+    if not isinstance(continuity, dict):
+        continuity = {}
+    if continuity.get("has_successor") not in (True, False):
+        missing.append("xác nhận có feature tiếp nối hay không")
+    if continuity.get("has_successor") is True:
+        handoffs = continuity.get("handoffs") or []
+        if not handoffs and continuity.get("exit_state"):
+            handoffs = [{
+                "branch_condition": continuity.get("exit_state"),
+                "successor_feature_id": continuity.get("successor_feature_id"),
+                "successor_feature_title": continuity.get("successor_feature_title"),
+                "exit_state": continuity.get("exit_state"),
+                "deferred_scope": continuity.get("deferred_scope") or [],
+            }]
+        if not handoffs:
+            missing.append("ít nhất một nhánh bàn giao")
+        for index, handoff in enumerate(handoffs, start=1):
+            branch_missing = []
+            if not handoff.get("branch_condition"):
+                branch_missing.append("điều kiện nhánh")
+            if not (handoff.get("successor_feature_id") or handoff.get("successor_feature_title")):
+                branch_missing.append("feature tiếp nối")
+            if not handoff.get("exit_state"):
+                branch_missing.append("End State bàn giao")
+            deferred_scope = handoff.get("deferred_scope") or []
+            if isinstance(deferred_scope, str):
+                deferred_scope = [deferred_scope]
+            if not any(str(item).strip() for item in deferred_scope):
+                branch_missing.append("chưa ghi nhận phạm vi nghiệp vụ thuộc feature tiếp nối (deferred_scope)")
+            if branch_missing:
+                missing.append(f"nhánh đi {index}: " + ", ".join(branch_missing))
+
+    if continuity.get("has_predecessor") is True:
+        incoming = continuity.get("incoming_handoffs") or []
+        if not incoming and continuity.get("predecessor_feature_id"):
+            incoming = [{
+                "predecessor_feature_id": continuity.get("predecessor_feature_id"),
+                "predecessor_feature_title": continuity.get("predecessor_feature_title"),
+                "predecessor_version": continuity.get("predecessor_version"),
+                "predecessor_end_state_id": continuity.get("predecessor_end_state_id"),
+                "entry_state": continuity.get("entry_state"),
+            }]
+        if not incoming:
+            missing.append("ít nhất một nhánh kế thừa từ Wiki đã duyệt")
+        for index, handoff in enumerate(incoming, start=1):
+            branch_missing = []
+            if not (handoff.get("predecessor_feature_id") or handoff.get("predecessor_feature_title")):
+                branch_missing.append("feature nguồn")
+            if not handoff.get("predecessor_version"):
+                branch_missing.append("version đã duyệt")
+            if not handoff.get("predecessor_end_state_id"):
+                branch_missing.append("mã End State nguồn")
+            if not handoff.get("entry_state"):
+                branch_missing.append("điều kiện đầu vào kiểm chứng được")
+            if branch_missing:
+                missing.append(f"nhánh vào {index}: " + ", ".join(branch_missing))
+
+    if missing:
+        flags["FD-F6"] = _flag(
+            6,
+            "Liên kết giữa các feature",
+            MISSING_VALUE,
+            "Cần hoàn tất " + "; ".join(missing) + ".",
+        )
+    else:
+        flags["FD-F6"] = _flag(6, "Liên kết giữa các feature", PASS)
     all_flags = dict(ctx.state.get("flags", {}))
     all_flags["fd"] = flags
     ctx.state["flags"] = all_flags

@@ -18,6 +18,8 @@ Return ONLY the screen as an HTML body fragment — no `<html>`, `<head>`, `<scr
 ## Art direction of this product
 {{direction}}
 
+- Carry the selected `background_treatment` into this final screen. Reuse its palette-derived background language across sibling screens, adapting motif placement and scale to each screen's content. Build the backdrop with CSS and/or inline SVG behind the interface; do not fall back to a flat empty canvas. Keep text and controls on contrast-safe surfaces, and do not turn background art into new labels, actions, logos, or functionality.
+
 ## Selected visual contract and decorative asset
 {{style_asset}}
 
@@ -32,6 +34,11 @@ Follow these rules while building the screen:
 {{design_rules}}
 
 Apply the screen-sequence identity and content rules as well: preserve one approved brand identity, keep it separate from hero/background artwork, align related text and controls deliberately, avoid repeated copy or default demo values, and carry the shared component language through sibling screens. Adapt the composition to this screen's task; do not force a generic template.
+
+## Project design contract metadata
+- When a Project Wiki visual contract is supplied, annotate reusable visual components with `data-design-role` and `data-design-variant` attributes so the approved token/component rules can be applied and audited deterministically. Use concise semantic identifiers consistently across sibling screens (for example, `action` + `primary`, `field` + `default`, or `surface` + `card`) and add a role only when the element actually serves that role.
+- These attributes are metadata only: they must not change visible content or layout. Do not add them to arbitrary wrappers just to inherit a style. Keep feature-specific structure and behavior governed by this screen's approved specification.
+- If no Project Wiki contract is supplied, build from the selected visual contract without inventing project-wide roles or tokens.
 
 ## Content and scope guard
 - Treat the supplied default screen specification as a strict content boundary. Render only its default fields, actions, navigation and required copy; do not use behavioral-state notes as visible content or infer extra product behavior from them.

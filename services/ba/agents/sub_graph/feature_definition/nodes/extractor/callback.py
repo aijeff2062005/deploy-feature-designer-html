@@ -10,6 +10,7 @@ from google.adk.models.llm_response import LlmResponse
 
 from agents.sub_graph.feature_definition.schemas import FeatureDefinitionData
 from callbacks.inject_context import insert_context
+from agents.sub_graph.shared.wiki_context import format_approved_wiki_context
 from managers.artifact.artifact_manager import merge_feature_definition_data
 from utils import logging
 from utils.utils import parse_str_to_dict
@@ -48,6 +49,7 @@ async def fd_merge_callback(
         actors=current_fd.get("actors") or [],
         scope_in=current_fd.get("scope_in") or [],
         scope_out=current_fd.get("scope_out") or [],
+        continuity=current_fd.get("continuity"),
     )
 
     merged = merge_feature_definition_data(current_data, parsed)
@@ -57,6 +59,7 @@ async def fd_merge_callback(
         "actors": merged.actors,
         "scope_in": merged.scope_in,
         "scope_out": merged.scope_out,
+        "continuity": merged.continuity.model_dump(exclude_none=True) if merged.continuity else None,
     }
     # Reassign top-level state key to trigger ADK State.__setitem__ and commit delta to session storage
     ctx_state["artifacts"] = artifacts
@@ -82,11 +85,27 @@ async def fd_extractor_inject_callback(
             "actors": artifacts.get("actors") or [],
             "scope_in": artifacts.get("scope_in") or [],
             "scope_out": artifacts.get("scope_out") or [],
+            "continuity": artifacts.get("continuity") or {},
         },
         ensure_ascii=False,
     )
 
     context_text = f"=== CURRENT DATA OF feature_definition ===\n{current_data_str}"
+    continuity = artifacts.get("continuity") or {}
+    unresolved = [
+        index for index, handoff in enumerate(continuity.get("handoffs") or [], start=1)
+        if not handoff.get("deferred_scope")
+    ]
+    if unresolved:
+        context_text += (
+            "\n=== DEFERRED SCOPE RECONCILIATION ===\n"
+            f"Branches with missing deferred_scope: {unresolved}. "
+            "Before the flags checker runs, reconcile these branches using explicit "
+            "downstream ownership in current Scope Out, user statements or approved Wiki. "
+            "Return the complete preserved handoffs list only if evidence supports an update. "
+            "An empty field does not prove the user has not supplied the information."
+        )
+    context_text += "\n" + format_approved_wiki_context(state)
     insert_context(llm_request, context_text)
     logger.info(
         f"fd_extractor_inject_callback: [ARTIFACT STATE] Current FD Artifact = {artifacts}"

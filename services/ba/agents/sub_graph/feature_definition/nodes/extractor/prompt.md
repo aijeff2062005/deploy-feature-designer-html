@@ -15,9 +15,9 @@ Nhiệm vụ Duy Nhất của bạn là đọc tin nhắn người dùng kết h
      ```json
      {
        "goal": "",
-       "actors": [],
-       "scope_in": [],
-       "scope_out": []
+       "actors": null,
+       "scope_in": null,
+       "scope_out": null
      }
      ```
 
@@ -37,6 +37,20 @@ Nhiệm vụ Duy Nhất của bạn là đọc tin nhắn người dùng kết h
 
 ---
 
+## FEATURE CONTINUITY EXTRACTION
+- Extract `continuity` only from explicit user statements or confirmed approved-Wiki data. Never infer a successor, predecessor, destination, or End State.
+- Preserve `has_successor` as unset until the user answers; set it to `false` only when the user confirms this feature is standalone, and `true` only when the user confirms a successor.
+- Preserve `has_predecessor` as unset until the user confirms whether this feature continues approved prior work; never infer it from feature order or title.
+- When `has_successor` is true, extract one `handoffs` record for every distinct confirmed terminal branch, with its branch condition, destination feature reference, resulting state and deferred scope. Keep deferred scope in Continuity only; do not copy or append it to `scope_out` unless the user explicitly includes it in the Scope Out list. Preserve the user's Scope Out list as its own complete list; never merge distinct handoff outcomes into it.
+- When the user confirms incoming continuation, extract one `incoming_handoffs` record per applicable approved source branch, including source feature ID/title/version, source End State ID/description and the verifiable entry condition. Never fabricate or omit a branch to make the list look complete.
+- Keep continuity `exit_state_id` separate from `workflow_end_state_id`; the former identifies the handoff outcome, while the latter references the matching End State in the workflow artifact. Do not copy one identifier into the other field.
+- Before returning any delta (including question-only or unrelated turns), reconcile missing deferred scope against explicit statements already present in CURRENT DATA, conversation history, or approved Wiki. This is an exception to the empty-output rules above: it records previously supplied facts, not new assumptions.
+- Read Scope Out together with each branch destination and condition. When a statement explicitly assigns excluded work to that destination, record that work in the corresponding handoff's `deferred_scope`; the user need not repeat it or name the schema field.
+- Do not copy all Scope Out items. Excluded work without explicit downstream ownership, hypothetical suggestions, session fields and navigation signals are not deferred business scope. A destination alone is not evidence of scope ownership.
+- Multiple branches may share deferred scope only when the source statement applies to their shared destination without a branch restriction. Respect branch-specific restrictions and conflicting or retracted statements; leave genuinely ambiguous scope unresolved.
+- When updating handoffs, return the COMPLETE handoffs list, preserving every existing branch and all its identifiers, conditions, destination and exit state. Preserve existing confirmed scope unless the user corrects it. Do not append duplicate branches or change Scope Out during reconciliation.
+- If no evidence-backed correction is possible, leave `continuity` unset. Never invent scope merely to satisfy the gate.
+
 ## QUY TẮC TRÍCH XUẤT VÀ HỢP NHẤT DỮ LIỆU (CRITICAL EXTRACTION RULES)
 
 ### 1. NGUYÊN TẮC THAM CHIẾU DỮ LIỆU HIỆN TẠI (CURRENT DATA):
@@ -46,13 +60,13 @@ Nhiệm vụ Duy Nhất của bạn là đọc tin nhắn người dùng kết h
 ### 2. QUY TẮC CHO TRƯỜNG ĐƯỢC CHỈNH SỬA / THAY ĐỔI:
 - Khi người dùng **tuyên bố thay đổi, sửa, thêm mới, hoặc xóa** thông tin của một trường (ví dụ: `actors`, `goal`, `scope_in`, `scope_out`):
   - **Trường Chuỗi (`goal`)**: Trả về câu văn mục tiêu MỚI hoàn chỉnh.
-  - **Trường Danh sách (`actors`, `scope_in`, `scope_out`)**: Dựa trên danh sách hiện tại trong Current Data, thực hiện chỉnh sửa (thêm/sửa/xóa) và trả về **TOÀN BỘ DANH SÁCH MỚI CẬP NHẬT** cho trường đó.
+  - **Trường Danh sách (`actors`, `scope_in`, `scope_out`)**: Dựa trên Current Data, áp dụng thay đổi của User rồi trả về **TOÀN BỘ DANH SÁCH MỚI**. Dùng `[]` khi User muốn xóa hết; dùng `null` hoặc bỏ trường khi User không yêu cầu thay đổi.
 
 ### 3. QUY TẮC CHO TRƯỜNG KHÔNG ĐƯỢC NHẮC ĐẾN:
 - Nếu trong lượt hội thoại hiện tại, người dùng **KHÔNG nhắc đến hoặc KHÔNG yêu cầu thay đổi** một trường nào:
   - **Trường Chuỗi (`goal`)**: Đặt giá trị là chuỗi rỗng `""`.
-  - **Trường Danh sách (`actors`, `scope_in`, `scope_out`)**: Đặt giá trị là danh sách rỗng `[]`.
-- Hệ thống backend sẽ giữ nguyên dữ liệu hiện tại cho các trường có giá trị `""` hoặc `[]`.
+  - **Trường Danh sách (`actors`, `scope_in`, `scope_out`)**: Đặt là `null` hoặc bỏ trường; không dùng `[]` trừ khi User yêu cầu xóa toàn bộ danh sách.
+- Hệ thống backend sẽ giữ nguyên dữ liệu hiện tại cho các trường không thay đổi (`""` hoặc `null`). Danh sách `[]` là yêu cầu xóa toàn bộ danh sách.
 
 ---
 
@@ -65,9 +79,9 @@ Nhiệm vụ Duy Nhất của bạn là đọc tin nhắn người dùng kết h
 ```json
 {
   "goal": "",
-  "actors": [],
-  "scope_in": [],
-  "scope_out": []
+  "actors": null,
+  "scope_in": null,
+  "scope_out": null
 }
 ```
 
@@ -78,9 +92,9 @@ Nhiệm vụ Duy Nhất của bạn là đọc tin nhắn người dùng kết h
 ```json
 {
   "goal": "",
-  "actors": [],
-  "scope_in": [],
-  "scope_out": []
+  "actors": null,
+  "scope_in": null,
+  "scope_out": null
 }
 ```
 
@@ -92,8 +106,8 @@ Nhiệm vụ Duy Nhất của bạn là đọc tin nhắn người dùng kết h
 {
   "goal": "",
   "actors": ["Khách hàng", "Cổng thanh toán Vietcombank"],
-  "scope_in": [],
-  "scope_out": []
+  "scope_in": null,
+  "scope_out": null
 }
 ```
 
@@ -104,8 +118,8 @@ Nhiệm vụ Duy Nhất của bạn là đọc tin nhắn người dùng kết h
 ```json
 {
   "goal": "Giúp tối ưu quy trình xử lý đơn hàng cho doanh nghiệp.",
-  "actors": [],
-  "scope_in": [],
-  "scope_out": []
+  "actors": null,
+  "scope_in": null,
+  "scope_out": null
 }
 ```

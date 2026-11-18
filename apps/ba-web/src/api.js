@@ -50,6 +50,12 @@ export async function getFeature(sessionId) {
   return res.json();
 }
 
+export async function reconcileContinuity(sessionId) {
+  const res = await fetch(`${API_BASE}/features/${sessionId}/reconcile-continuity`, { method: 'POST' });
+  if (!res.ok) throw new Error(`Continuity sync failed: ${res.status}`);
+  return res.json();
+}
+
 /**
  * Delete a BA feature.
  * @param {string} sessionId - Feature session ID
@@ -78,13 +84,24 @@ export async function exportFeature(sessionId) {
   return res.json();
 }
 
-export async function exportAndOpenDesigner(sessionId) {
+export async function exportAndOpenDesigner(sessionId, options = {}) {
   const res = await fetch(`${API_BASE}/features/${sessionId}/designer-handoff`, {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(options),
   });
   if (!res.ok) {
     const errText = await res.text();
     throw new Error(`Designer handoff failed: ${res.status} — ${errText}`);
+  }
+  return res.json();
+}
+
+export async function getFeatureWikiPreview(sessionId) {
+  const res = await fetch(`${API_BASE}/features/${sessionId}/wiki-preview`);
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Wiki preview failed: ${res.status} — ${errText}`);
   }
   return res.json();
 }

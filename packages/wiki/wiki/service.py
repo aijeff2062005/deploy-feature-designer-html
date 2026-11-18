@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 
 from datetime import datetime, timezone
@@ -24,6 +25,8 @@ from wiki.llm_config import build_sorter
 from wiki.paths import blob_key, delete_blob, put_blob
 from wiki.permissions import require_project_scope, require_tool
 from wiki.sort import Sorter
+
+logger = logging.getLogger(__name__)
 
 
 def _now() -> str:
@@ -323,6 +326,7 @@ class WikiService:
             page.status = "proposed"
         self._upsert_page(page, actor.actor, create_revision=True)
         self.conn.commit()
+        self._write_project_file(page, actor.actor)
         log_audit(
             self.root,
             operation="wiki.propose_page",
@@ -466,6 +470,7 @@ class WikiService:
         page.updated_at = now
         self._upsert_page(page, actor.actor, create_revision=True)
         self.conn.commit()
+        self._write_project_file(page, actor.actor)
         log_audit(
             self.root,
             operation="wiki.approve_page",
@@ -499,6 +504,7 @@ class WikiService:
         page.updated_at = now
         self._upsert_page(page, actor.actor, create_revision=True)
         self.conn.commit()
+        self._write_project_file(page, actor.actor)
         log_audit(
             self.root,
             operation="wiki.demote_page",
@@ -506,6 +512,43 @@ class WikiService:
             extra={"page_id": page_id, "version": page.version, "status": "draft"},
         )
         return page
+
+    def _write_project_file(self, page: WikiPage, actor_name: str) -> None:
+        """Mirror project Wiki pages to canonical Markdown after a DB commit."""
+        if page.namespace != "project" or not page.project_id:
+            return
+        try:
+            from wiki.project_files import ProjectFileWiki
+
+            files = ProjectFileWiki()
+            safe_id = re.sub(r"[^A-Za-z0-9_-]", "-", page.page_id).strip("-")[:100] or "page"
+            status = page.status if page.status in {"approved", "archived"} else "draft"
+            markdown = "\n".join([
+                f"# {page.title}", "", page.body.strip(), "",
+                f"Source Wiki page: `{page.page_id}`.",
+            ])
+            metadata = {
+                "page_id": page.page_id,
+                "bucket_id": page.bucket_id,
+                "namespace": page.namespace,
+                "source_ids": page.source_ids,
+                "updated_by": actor_name,
+                "updated_at": page.updated_at,
+                "approved_by": actor_name if status == "approved" else None,
+                "approved_at": page.updated_at if status == "approved" else None,
+            }
+            files.write_markdown(page.project_id, f"pages/{safe_id}.md", title=page.title,
+                                 document_type=page.bucket_id, version=page.version,
+                                 status=status, body=markdown, metadata=metadata)
+            if status == "approved":
+                files.write_markdown(page.project_id, f"history/pages/{safe_id}/v{page.version}.md",
+                                     title=page.title, document_type=page.bucket_id,
+                                     version=page.version, status="approved", body=markdown,
+                                     metadata=metadata)
+                from wiki.basic_memory import BasicMemoryClient
+                BasicMemoryClient().ensure_project(page.project_id, files.markdown_root(page.project_id))
+        except Exception:
+            logger.exception("Could not sync project Wiki page %s to Markdown", page.page_id)
 
     def delete_page(self, actor: Actor, page_id: str) -> dict[str, Any]:
         """Human-only hard delete of one page (+ revisions). Agents denied."""

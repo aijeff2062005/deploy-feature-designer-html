@@ -24,11 +24,11 @@ def create_oq_asm_detector_node():
     instruction = (
         prompt_path.read_text(encoding="utf-8") if prompt_path.exists() else ""
     ) + (
-        "\n\nWhen resolving an OQ, inspect ALL CURRENT BA ARTIFACTS and populate "
-        "open_questions[].affected_artifacts and resolved_questions[].affected_artifacts with every affected existing FD/BR/WF/US/UI-touchpoint ID "
-        "that must change to reflect the answer. Do not mark the OQ resolved if the "
-        "answer is insufficient. These references drive a sequential follow-through "
-        "agent before the user-facing reply."
+        "\n\nWhen resolving an OQ, inspect the current BA artifacts and identify every "
+        "existing artifact that must change to reflect the answer. Include the artifact "
+        "for the section where the question was raised when the answer changes that section. "
+        "Use exact existing artifact IDs and never infer targets from fixed domain keywords. "
+        "Do not ask the user for a second approval to synchronize an answer they have already confirmed."
     )
 
     return LlmAgent(
@@ -54,7 +54,7 @@ def create_oq_followthrough_node():
         model=base_model,
         instruction=(
             "You synchronize resolved BA Open Questions into existing artifacts. "
-            "Use only the supplied answers and referenced artifacts. The supplied target list has already been expanded to include matching BR, WF, US, and UI touchpoints; "
+            "Use only the supplied answers and referenced artifacts. "
             "review every listed artifact and update every part that must reflect the decision. "
             "When one artifact changes, ensure its listed downstream artifacts remain consistent too. "
             "Do not ask the user to identify the artifacts or to request synchronization. "

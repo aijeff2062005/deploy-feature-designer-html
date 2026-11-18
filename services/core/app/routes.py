@@ -352,7 +352,7 @@ def list_project_files(project_id: str) -> list[dict[str, Any]]:
             "created_by_name": users.get(a["created_by"] or "", a["created_by"]),
             "created_at": a["created_at"],
             "scope": "project",
-            "citable": a["kind"] in ("ba_package", "bpmn", "ui_spec"),
+            "citable": a["kind"] in ("ba_package", "bpmn", "ui_spec", "project_design_wiki"),
             "download_url": f"/api/core/artifacts/{a['id']}/download",
         })
     for s in sources:

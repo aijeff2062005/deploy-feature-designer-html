@@ -7,6 +7,50 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+class FeatureHandoffData(BaseModel):
+    """One outgoing workflow branch and its downstream feature contract."""
+
+    branch_condition: str | None = Field(None, description="Confirmed condition that selects this terminal branch.")
+    successor_feature_id: str | None = Field(None, description="Known downstream feature ID, if created.")
+    successor_feature_title: str | None = Field(None, description="User-confirmed downstream feature title.")
+    exit_state_id: str | None = Field(None, description="Stable identifier for this continuity outcome.")
+    workflow_end_state_id: str | None = Field(None, description="Matching End State ID in the approved workflow artifact.")
+    exit_state: str | None = Field(None, description="Confirmed outcome and state handed off by this branch.")
+    deferred_scope: list[str] | None = Field(None, description="Scope owned by the downstream feature for this branch.")
+
+
+class IncomingFeatureHandoffData(BaseModel):
+    """One approved upstream branch accepted by the current feature."""
+
+    predecessor_feature_id: str | None = Field(None, description="Approved upstream feature ID.")
+    predecessor_feature_title: str | None = Field(None, description="Approved upstream feature title.")
+    predecessor_version: str | None = Field(None, description="Approved upstream version used as source.")
+    predecessor_end_state_id: str | None = Field(None, description="Approved upstream End State ID.")
+    predecessor_end_state: str | None = Field(None, description="Approved upstream End State description.")
+    entry_state: str | None = Field(None, description="Verifiable starting condition inherited by this branch.")
+
+
+class FeatureContinuityData(BaseModel):
+    """Explicit upstream/downstream feature handoff contracts."""
+
+    has_successor: bool | None = Field(None, description="Set only after the user confirms whether a successor exists.")
+    has_predecessor: bool | None = Field(None, description="Set only after the user confirms whether this feature continues approved prior work.")
+    handoffs: list[FeatureHandoffData] | None = Field(None, description="One record per distinct outgoing workflow branch.")
+    incoming_handoffs: list[IncomingFeatureHandoffData] | None = Field(None, description="Approved predecessor branches accepted by this feature.")
+    # Legacy single-handoff fields are retained so existing saved sessions remain readable.
+    successor_feature_id: str | None = Field(None, description="Known downstream feature ID, if created.")
+    successor_feature_title: str | None = Field(None, description="User-confirmed downstream feature title.")
+    exit_state_id: str | None = Field(None, description="Stable identifier for this continuity outcome.")
+    workflow_end_state_id: str | None = Field(None, description="Matching End State ID in the approved workflow artifact.")
+    exit_state: str | None = Field(None, description="Confirmed outcome and state handed to the downstream feature.")
+    deferred_scope: list[str] | None = Field(None, description="Confirmed scope excluded here and owned by the downstream feature.")
+    predecessor_feature_id: str | None = Field(None, description="Approved upstream feature ID, when known.")
+    predecessor_feature_title: str | None = Field(None, description="Approved upstream feature title.")
+    predecessor_version: str | None = Field(None, description="Approved upstream feature version used as source.")
+    predecessor_end_state_id: str | None = Field(None, description="Upstream approved End State ID referenced here.")
+    entry_state: str | None = Field(None, description="Confirmed starting condition inherited from the upstream End State.")
+
+
 class FeatureDefinitionData(BaseModel):
     """Schema cho FD Extractor output. LLM trả về delta mỗi turn."""
 
@@ -18,17 +62,23 @@ class FeatureDefinitionData(BaseModel):
     actors: list[str] | None = Field(
         None,
         description="Danh sách actors liên quan (format: 'ACT-NAME: mô tả vai trò'). "
-        "Gộp actors mới vào danh sách hiện tại, KHÔNG xóa actors cũ.",
+        "Nếu có thay đổi, trả về toàn bộ danh sách mới; null nếu không thay đổi; [] nếu người dùng xóa toàn bộ.",
     )
     scope_in: list[str] | None = Field(
         None,
         description="Capabilities thuộc phạm vi feature. "
-        "Thêm mới vào danh sách hiện tại.",
+        "Nếu có thay đổi, trả về toàn bộ danh sách mới; null nếu không thay đổi; [] nếu người dùng xóa toàn bộ.",
     )
     scope_out: list[str] | None = Field(
         None,
         description="Capabilities KHÔNG thuộc phạm vi. "
-        "Thêm mới vào danh sách hiện tại.",
+        "Nếu có thay đổi, trả về toàn bộ danh sách mới; null nếu không thay đổi; [] nếu người dùng xóa toàn bộ.",
+    )
+
+
+    continuity: FeatureContinuityData | None = Field(
+        None,
+        description="Confirmed feature handoff details; never infer missing links or states.",
     )
 
 
@@ -46,7 +96,7 @@ class OpenQuestionItem(BaseModel):
     )
     affected_artifacts: list[dict[str, str]] = Field(
         default_factory=list,
-        description="Existing BR/WF/US artifact IDs this question may affect, when identifiable.",
+        description="Existing BA artifact references this question may affect, including the artifact for the section where it was raised when applicable.",
     )
 
 
@@ -124,7 +174,10 @@ class OQASMDetectionData(BaseModel):
 
 __all__ = [
     "AssumptionItem",
+    "FeatureContinuityData",
+    "FeatureHandoffData",
     "FeatureDefinitionData",
+    "IncomingFeatureHandoffData",
     "OQASMDetectionData",
     "OpenQuestionItem",
     "OpenQuestionResolution",

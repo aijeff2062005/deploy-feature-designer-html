@@ -16,6 +16,7 @@ import asyncio
 import base64
 import dataclasses
 import functools
+import hashlib
 import inspect
 import json
 import logging
@@ -43,6 +44,115 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("designer_agent.designer")
 _TRACE_CONTEXT: ContextVar[tuple[Any, str] | None] = ContextVar("designer_trace_context", default=None)
+_PROJECT_WIKI_STYLE_LOCK = re.compile(r"<style id=\"project-wiki-style-lock\">.*?</style>", re.S | re.I)
+
+
+def _apply_project_wiki_backdrop(
+    markup: str, reference: dict[str, Any] | None, *, target_selectors: list[str] | None = None,
+) -> str:
+    """Apply only the conflict-free semantic role rules captured in Project Wiki."""
+    cleaned = _PROJECT_WIKI_STYLE_LOCK.sub("", fragment_of(markup))
+    css = str((reference or {}).get("style_lock_css") or "").strip()
+    if not css:
+        return cleaned
+    # Role selectors are emitted from validated role/variant identifiers and only
+    # target elements carrying the explicit semantic contract attributes.
+    return cleaned + f'\n<style id="project-wiki-style-lock">\n{css}\n</style>'
+
+
+_PROJECT_WIKI_STYLE_PROFILE_JS = r"""() => {
+  const safeName = (value) => /^[a-z][a-z0-9_-]*$/i.test(value || '');
+  const properties = ['color', 'backgroundColor', 'borderColor', 'borderRadius',
+    'fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'boxShadow'];
+  const tokens = {};
+  const rootStyle = getComputedStyle(document.documentElement);
+  for (const name of rootStyle) {
+    if (/^--(?:color|font|radius|spacing|shadow|text)-[a-z0-9_-]+$/i.test(name)) {
+      const value = rootStyle.getPropertyValue(name).trim();
+      if (value) tokens[name] = value;
+    }
+  }
+  const roles = {};
+  for (const element of document.querySelectorAll('[data-design-role][data-design-variant]')) {
+    const role = element.getAttribute('data-design-role');
+    const variant = element.getAttribute('data-design-variant');
+    if (!safeName(role) || !safeName(variant)) continue;
+    const style = getComputedStyle(element);
+    const values = Object.fromEntries(properties.map((name) => [name, style[name]]));
+    (roles[role] ||= {})[variant] ||= [];
+    roles[role][variant].push(values);
+  }
+  return { tokens, roles };
+}"""
+
+
+def _project_wiki_style_css(profile: dict[str, Any]) -> str:
+    """Render only explicit semantic role/variant data; never infer global selectors."""
+    roles = profile.get("roles") if isinstance(profile, dict) else None
+    if not isinstance(roles, dict):
+        return ""
+    declarations = {
+        "color": "color", "backgroundColor": "background-color", "borderColor": "border-color",
+        "borderRadius": "border-radius", "fontFamily": "font-family", "fontSize": "font-size",
+        "fontWeight": "font-weight", "lineHeight": "line-height", "boxShadow": "box-shadow",
+    }
+    css: list[str] = []
+    for role, variants in sorted(roles.items()):
+        if not re.fullmatch(r"[a-z][a-z0-9_-]*", str(role), re.I) or not isinstance(variants, dict):
+            continue
+        for variant, properties in sorted(variants.items()):
+            if not re.fullmatch(r"[a-z][a-z0-9_-]*", str(variant), re.I) or not isinstance(properties, dict):
+                continue
+            safe = {}
+            for source, target in declarations.items():
+                record = properties.get(source)
+                value = record.get("value") if isinstance(record, dict) and not record.get("conflict") else None
+                if (isinstance(value, str) and value.strip()
+                        and not any(ch in value for ch in "{};\x00")
+                        and "</style" not in value.casefold()):
+                    safe[target] = value.strip()
+            if safe:
+                selector = f'[data-design-role="{role}"][data-design-variant="{variant}"]'
+                css.append(selector + " { " + "; ".join(f"{key}: {value}" for key, value in safe.items()) + "; }")
+    return "\n".join(css)
+
+
+def _merge_project_wiki_profiles(screen_profiles: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate explicit token and component observations without selecting a winner."""
+    def merge_values(observations: list[tuple[str, str]]) -> dict[str, Any]:
+        grouped: dict[str, list[str]] = {}
+        for source, value in observations:
+            if value:
+                grouped.setdefault(value, []).append(source)
+        values = [{"value": value, "sources": sources} for value, sources in sorted(grouped.items())]
+        return {"value": values[0]["value"] if len(values) == 1 else None,
+                "values": values, "conflict": len(values) > 1}
+
+    token_observations: dict[str, list[tuple[str, str]]] = {}
+    role_observations: dict[str, dict[str, dict[str, list[tuple[str, str]]]]] = {}
+    for screen in screen_profiles:
+        source = str(screen.get("screen_id") or "unknown")
+        profile = screen.get("profile") if isinstance(screen.get("profile"), dict) else {}
+        for token, value in (profile.get("tokens") or {}).items():
+            if isinstance(value, str) and value.strip():
+                token_observations.setdefault(str(token), []).append((source, value.strip()))
+        for role, variants in (profile.get("roles") or {}).items():
+            if not isinstance(variants, dict):
+                continue
+            for variant, samples in variants.items():
+                if not isinstance(samples, list):
+                    samples = [samples]
+                for sample in samples:
+                    if not isinstance(sample, dict):
+                        continue
+                    for prop, value in sample.items():
+                        if isinstance(value, str) and value.strip():
+                            role_observations.setdefault(str(role), {}).setdefault(str(variant), {}).setdefault(str(prop), []).append((source, value.strip()))
+    tokens = {name: merge_values(rows) for name, rows in sorted(token_observations.items())}
+    roles = {role: {variant: {prop: merge_values(rows) for prop, rows in sorted(properties.items())}
+                    for variant, properties in sorted(variants.items())}
+             for role, variants in sorted(role_observations.items())}
+    return {"tokens": tokens, "roles": roles, "screens": screen_profiles}
 
 
 def _trace_value(value: Any, limit: int = 40_000) -> Any:
@@ -331,7 +441,10 @@ def _approved_source_for_screen(spec: UiSpec, screen_id: str) -> dict[str, Any]:
 def _default_visual_contract(contract: dict[str, Any], approved_screen: dict[str, Any]) -> dict[str, Any]:
     """Remove state-bearing prose before a visual contract reaches UI generation."""
     result = dict(contract or {})
-    for field in ("direction", "tagline", "composition", "surface_language", "shape_language", "hero_placement"):
+    for field in (
+        "direction", "tagline", "composition", "surface_language", "shape_language",
+        "hero_placement", "background_treatment",
+    ):
         if _is_conditional_copy(str(result.get(field, "")), approved_screen):
             result.pop(field, None)
     return result
@@ -450,11 +563,26 @@ def _style_preview_reviews(response: str, candidates: list[StyleCandidate]) -> d
         return None
     by_key = {row.get("key"): row for row in rows if isinstance(row, dict)}
     issues: dict[str, list[str]] = {}
+
+    def format_issue(note: Any) -> str:
+        if isinstance(note, dict):
+            element = str(note.get("element") or "Visible element").strip()
+            defect = str(note.get("defect") or note.get("issue") or "Needs visual correction").strip()
+            correction = str(note.get("correction") or "").strip()
+            return f"{element}: {defect}" + (f" Correction: {correction}" if correction else "")
+        return str(note).strip()
+
     for candidate in candidates:
         row = by_key.get(candidate.key)
         if not row or row.get("ready") is not True:
             notes = row.get("issues", []) if row else []
-            issues[candidate.key] = [str(note) for note in notes if str(note).strip()][:3]
+            issues[candidate.key] = []
+            for note in notes:
+                text = format_issue(note)
+                if text:
+                    issues[candidate.key].append(text)
+                if len(issues[candidate.key]) == 3:
+                    break
             if not issues[candidate.key]:
                 issues[candidate.key] = [
                     "Inspect the screenshot and improve its product fit, legibility, source fidelity, and visual distinction."
@@ -612,6 +740,33 @@ class HtmlDesigner:
         runs = await self._session_runs(session, run)
         screens = await self.store.list_screens(session.id)
         brief = await self.store.get_design_brief(session.id)
+        style_mode = await self.store.get_run_data(run.id, run.revision, "project_style_mode") or {}
+        explore_project_styles = style_mode.get("mode") == "explore"
+        project_wiki = (
+            await self.store.get_project_design_wiki(session.project_id)
+            if session.project_id and not explore_project_styles else None
+        )
+        inherited_style = None
+        if project_wiki and isinstance(project_wiki.get("baseline"), dict):
+            baseline = project_wiki["baseline"]
+            contract = baseline.get("contract")
+            if (not brief.style_preview_shown and isinstance(contract, dict)
+                    and contract.get("key") and contract.get("name")
+                    and (not brief.selected_style_contract or brief.selected_style_key == contract.get("key"))):
+                inherited_style = StyleCandidate.model_validate(contract)
+                # A project baseline is an approved visual contract, not prior chat.
+                # Seed only the reusable style fields into this feature's brief.
+                if not brief.selected_style_contract:
+                    brief.style_candidates = [inherited_style]
+                    brief.selected_style_key = inherited_style.key
+                    brief.style_name = inherited_style.name
+                    brief.style_direction = inherited_style.direction or inherited_style.tagline
+                    brief.selected_style_contract = inherited_style.model_dump(mode="json")
+                    brief.style_preview_shown = False
+                    await self.store.save_design_brief(session.id, brief)
+            if not session.design_system_id and baseline.get("design_system_id"):
+                await self.store.set_session_design_system(session.id, baseline["design_system_id"])
+                session.design_system_id = baseline["design_system_id"]
         usage: dict[str, int] = {}
         decision = await self._llm_call("structured", trace_name="router.decide_intent",
             prompt=self.prompts.render(
@@ -668,6 +823,20 @@ class HtmlDesigner:
             await self._trace_decision(run, "start_design.missing_brief", "intent == start_design and brief.missing_fields()", "continue_gathering", {
                 "missing_fields": brief.missing_fields(), "unresolved_screens": unresolved,
             })
+        if inherited_style:
+            source_title = (project_wiki or {}).get("baseline", {}).get("source_feature_title")
+            source_text = f" từ feature **{source_title}**" if source_title else ""
+            decision.reply = (
+                f"**Project Wiki:** Feature này sẽ dùng chuẩn thiết kế đã duyệt **{inherited_style.name}**{source_text}. "
+                "Mình chỉ kế thừa design system chung; yêu cầu và trạng thái vẫn lấy từ BA package của feature hiện tại.\n\n"
+                f"{decision.reply}"
+            )
+        if decision.intent == "start_design" and inherited_style and not brief.missing_fields():
+            await self._offer_style_previews(
+                run, session, brief, inherited_candidate=inherited_style,
+                inherited_source=(project_wiki or {}).get("baseline", {}).get("source_feature_title"),
+            )
+            return
         valid_style_choice = (
             brief.style_preview_shown
             and bool(brief.style_direction)
@@ -717,8 +886,181 @@ class HtmlDesigner:
         run = await self.store.update_run(run.id, intent=intent, assistant_message=decision.reply, specification=spec)
         await self.build(run.id, targets, instruction=decision.instruction or run.prompt, review=False)
 
-    async def _offer_style_previews(self, run: RunView, session: SessionView, brief) -> None:
-        """Render three visual treatments of one confirmed screen and offer them in chat."""
+    async def capture_project_wiki_visual_system(self, session: SessionView) -> dict[str, Any]:
+        """Capture explicit design tokens and annotated component roles from every approved screen."""
+        screens = [item for item in await self.store.list_screens(session.id, with_html=True) if item.html]
+        platforms = list(dict.fromkeys(item.platform for item in screens))
+        design = await design_context(self.store, session)
+        profiles: dict[str, Any] = {}
+        for platform in platforms:
+            platform_screens = [item for item in screens if item.platform == platform]
+            observations = []
+            for source in platform_screens:
+                html = await inline_assets(source.html or "", session.project_id)
+                async with self.service.renderer.page(
+                    html,
+                    width=source.width or SCREEN_WIDTHS.get(platform, 390),
+                    height=900,
+                    theme_css=design.theme_css,
+                    fonts=design.fonts,
+                ) as page:
+                    profile = await page.evaluate(_PROJECT_WIKI_STYLE_PROFILE_JS) or {}
+                observations.append({
+                    "screen_id": source.id,
+                    "screen_name": source.name,
+                    "screen_version": source.version,
+                    "width": source.width,
+                    "html_sha256": hashlib.sha256((source.html or "").encode("utf-8")).hexdigest(),
+                    "profile": profile,
+                })
+            aggregate = _merge_project_wiki_profiles(observations)
+            source = platform_screens[0]
+            profiles[platform] = {
+                "source_screen_id": source.id,
+                "source_screen_name": source.name,
+                "source_screen_version": source.version,
+                "source_screen_width": source.width,
+                "source_session_id": str(session.id),
+                "profile": aggregate,
+                "css": _project_wiki_style_css(aggregate),
+            }
+        if not profiles:
+            raise AppError(
+                "PROJECT_WIKI_STYLE_SOURCE_EMPTY",
+                "No approved screen is available for the Project Wiki baseline",
+                "The approved feature has no saved screen HTML. Save at least one approved screen before promoting its style to the project Wiki.",
+                409,
+                True,
+                action="Restore or approve a feature with saved screens, then retry.",
+            )
+        return {"schema_version": 3, "platforms": profiles}
+
+    async def _project_wiki_style_reference(
+        self, session: SessionView, *, style_key: str, platform: str,
+    ) -> dict[str, Any] | None:
+        """Render the approved source feature screen for visual-only Wiki inheritance."""
+        if not session.project_id or not style_key:
+            return None
+        wiki = await self.store.get_project_design_wiki(session.project_id)
+        baseline = (wiki or {}).get("baseline") or {}
+        contract = baseline.get("contract") or {}
+        if not isinstance(contract, dict) or contract.get("key") != style_key:
+            return None
+        source_id = (wiki or {}).get("source_session_id")
+        if not source_id:
+            raise AppError(
+                "PROJECT_WIKI_STYLE_REFERENCE_UNAVAILABLE",
+                "The approved Project Wiki has no source design session",
+                "The project style baseline exists, but its approved source screen cannot be loaded. Restore or re-approve the source feature before building this feature.",
+                409,
+                True,
+                action="Restore or re-approve the Project Wiki source feature, then retry.",
+            )
+        try:
+            source_session = await self.store.get_session(UUID(str(source_id)))
+            if not source_session or source_session.project_id != session.project_id:
+                raise ValueError("The Project Wiki source session is missing or belongs to another project")
+            saved_visual_system = baseline.get("visual_system") or {}
+            saved_platform = (saved_visual_system.get("platforms") or {}).get(platform) or {}
+            source_screen_id = saved_platform.get("source_screen_id")
+            source_screen_version = saved_platform.get("source_screen_version")
+            source_screen = None
+            if source_screen_id and source_screen_version:
+                source_screen = await self.store.get_screen(
+                    source_session.id, str(source_screen_id), int(source_screen_version),
+                )
+                if source_screen and source_screen.platform != platform:
+                    raise ValueError("The pinned Project Wiki source screen platform does not match the requested platform")
+            if source_screen is None:
+                # Compatibility path for pre-snapshot Wiki entries.
+                source_screens = await self.store.list_screens(source_session.id, with_html=True)
+                candidates = [item for item in source_screens if item.html]
+                if not candidates:
+                    raise ValueError("The Project Wiki source session has no saved screen HTML")
+                source_screen = next((item for item in candidates if item.platform == platform), candidates[0])
+            source_design = await design_context(self.store, source_session)
+            html = await inline_assets(source_screen.html or "", session.project_id)
+            style_profile = saved_platform.get("profile")
+            if not isinstance(style_profile, dict) or not isinstance(style_profile.get("roles"), dict):
+                # Legacy snapshots used guesses (first field/button/card and viewport geometry).
+                # Do not promote that inferred data to a new feature's style authority.
+                style_profile = {"tokens": {}, "roles": {}, "screens": []}
+            style_lock_css = _project_wiki_style_css(style_profile)
+            rendered = await self.service.renderer.render(
+                html,
+                width=source_screen.width or SCREEN_WIDTHS.get(source_screen.platform, 390),
+                height=900,
+                theme_css=source_design.theme_css,
+                fonts=source_design.fonts,
+                screenshot="jpeg",
+                scale=0.8,
+                lint=False,
+                axe=False,
+                max_height=2400,
+            )
+            if not rendered.image:
+                raise ValueError("The Project Wiki source screen could not be rendered")
+            return {
+                "image": rendered.image,
+                "feature_title": baseline.get("source_feature_title") or source_session.title,
+                "screen_name": source_screen.name,
+                "platform": source_screen.platform,
+                "style_name": contract.get("name", ""),
+                "wiki_version": (wiki or {}).get("version"),
+                "visual_system_source": "saved_semantic_contract" if style_profile.get("roles") or style_profile.get("tokens") else "contract_only",
+                "style_lock_css": style_lock_css,
+                "style_profile": style_profile,
+            }
+        except AppError:
+            raise
+        except Exception as error:
+            logger.exception("Could not render the Project Design Wiki source screen for style inheritance")
+            raise AppError(
+                "PROJECT_WIKI_STYLE_REFERENCE_UNAVAILABLE",
+                "The approved Project Wiki source screen could not be loaded",
+                "The new screen was not generated without its approved visual reference. Retry after the source feature is available.",
+                502,
+                True,
+                action="Retry the build; if it persists, restore or re-approve the source feature's design in Project Wiki.",
+            ) from error
+
+    @staticmethod
+    def _style_reference_instruction(reference: dict[str, Any] | None) -> str:
+        if not reference:
+            return ""
+        profile = reference.get("style_profile") if isinstance(reference.get("style_profile"), dict) else {}
+        contract_lines = []
+        for name, record in sorted((profile.get("tokens") or {}).items()):
+            if isinstance(record, dict) and not record.get("conflict") and record.get("value"):
+                contract_lines.append(f"- Token {name}: {record['value']}")
+        for role, variants in sorted((profile.get("roles") or {}).items()):
+            if not isinstance(variants, dict):
+                continue
+            for variant, properties in sorted(variants.items()):
+                if not isinstance(properties, dict):
+                    continue
+                values = [f"{prop}={record['value']}" for prop, record in sorted(properties.items())
+                          if isinstance(record, dict) and not record.get("conflict") and record.get("value")]
+                if values:
+                    contract_lines.append(f"- Component {role}/{variant}: " + ", ".join(values))
+        contract_text = "\n".join(contract_lines) or "- No reusable semantic values were recorded; follow the selected project visual contract."
+        return (
+            "\nProject Wiki inheritance: use the approved project visual contract and semantic token/component "
+            "roles as the source of truth. Reuse only values recorded without conflicts; a conflict means the "
+            "contract does not prescribe that value. Preserve the current feature's BA-defined screen content, "
+            "layout, states, navigation and interactions. The attached approved screen is visual reference only: "
+            "do not copy its page background, decorative artwork, screen structure, labels or feature-specific "
+            "content. Apply shared values to the same semantic component role/variant only; do not style elements "
+            "by size, DOM position, class-name guesses, or by being the first/largest control. When the Wiki has "
+            "no matching role, follow the selected visual contract consistently and do not invent a Wiki override.\n"
+            "Approved Project Wiki values (conflicted values are intentionally omitted):\n" + contract_text
+        )
+
+    async def _offer_style_previews(
+        self, run: RunView, session: SessionView, brief, *,
+        inherited_candidate: StyleCandidate | None = None, inherited_source: str | None = None,
+    ) -> None:
+        """Render three style directions, or one inherited project-Wiki preview."""
         _TRACE_CONTEXT.set((run, "style previews"))
         screen = _representative_preview_screen(brief.screens)
         if screen is None:
@@ -755,6 +1097,11 @@ class HtmlDesigner:
             "preview_initial_state_only": True,
         }, ensure_ascii=False)
         settings = self.service.settings
+        style_reference = (
+            await self._project_wiki_style_reference(session, style_key=inherited_candidate.key, platform=platform)
+            if inherited_candidate else None
+        )
+        reference_instruction = self._style_reference_instruction(style_reference)
         preview_theme = design.theme_css if design.id != DEFAULT_DESIGN_SYSTEM else None
         preview_fonts = design.fonts if design.id != DEFAULT_DESIGN_SYSTEM else None
         # Product descriptions and prior conversation can contain state
@@ -794,7 +1141,7 @@ class HtmlDesigner:
                 model=settings.effective_designer_model,
                 usage=plan_usage,
             )
-            candidates = plan.options
+            candidates = [inherited_candidate] if inherited_candidate else plan.options
             # The art director sees only first-paint content; state metadata stays
             # in the BA spec and never enters preview generation.
             content_contract = plan.content_contract
@@ -870,9 +1217,10 @@ class HtmlDesigner:
                 direction=(f"Gallery palette exploration policy: {plan.palette_exploration}. "
                            f"Style option '{candidate.name}' is the visual authority for this preview. "
                            f"Direction: {candidate.direction or candidate.tagline}. "
+                           f"Required background treatment: {candidate.background_treatment or 'create a palette-derived decorative gradient/texture and original SVG motif, behind content, covering at least 18% of the canvas'}. "
                            f"Visual contract: {candidate.model_dump_json(exclude={'key', 'name', 'tagline', 'direction', 'recommended'})}. "
                            "Make its composition, typography, surfaces, color balance and product-specific visual motif unmistakable; "
-                           "do not fall back to a generic form or default style."),
+                           "do not fall back to a generic form or default style." + reference_instruction),
                 design_system=self._design_text(design, query),
                 skill=knowledge.frontend_design_skill() + "\n\n" + knowledge.style_preview_skill(),
                 design_rules=knowledge.ui_ux_design_rules(),
@@ -890,6 +1238,7 @@ class HtmlDesigner:
                     review_feedback=review_feedback or "(none)",
                     previous_html=previous_html or "(none)",
                 ),
+                images=[style_reference["image"]] if style_reference else None,
                 usage=usage, model=settings.effective_designer_model,
                 timeout_seconds=settings.designer_page_timeout_seconds,
             )
@@ -918,7 +1267,10 @@ class HtmlDesigner:
                 "asset_credit": assigned_asset.get("credit", "") if asset_included and assigned_asset else "",
                 "asset_source_url": assigned_asset.get("source_url", "") if asset_included and assigned_asset else "",
                 "image": f"data:{result.mime or 'image/jpeg'};base64,{base64.b64encode(result.image or b'').decode('ascii')}",
-                "html": html,
+                "html": render_html,
+                "compiled_css": result.css,
+                "preview_width": width,
+                "preview_height": result.height,
                 "rendered_image": result.image,
                 "qa_errors": [finding for finding in result.blocking],
             }
@@ -952,6 +1304,9 @@ class HtmlDesigner:
                                 ) if part)
                                 for node in finding.get("elements", [])[:3]
                             ) + ". " + (
+                                "Add a decorative data-preview-background layer with palette-derived CSS gradients/textures or inline SVG; "
+                                "it must cover at least 18% of the canvas, stay behind content, and add no copy or controls. "
+                                if finding.get("rule") == "background-treatment" else
                                 "Set the actual text/password input hit box to at least 48px high (for example min-h-12), "
                                 "and make its field row at least 48px high; do not enlarge only a non-interactive outer card. "
                                 "Keep any eye/clear icon button at least 48×48px."
@@ -986,7 +1341,12 @@ class HtmlDesigner:
                 response = await self._llm_call("generate", trace_name="style_preview.review_candidate",
                     system=self.prompts.render("style-preview-review"),
                     text=("Approved screen data and exact-content contract:\n" + screen_context +
-                          "\n\nCompare the three screenshots as one gallery. Style options in screenshot order:\n" +
+                          ("\n\nReview the inherited style preview for alignment with its saved visual contract:\n"
+                           if inherited_candidate else
+                           "\n\nCompare the three screenshots as one gallery. Style options in screenshot order:\n") +
+                          ("\nThe first attached image is the approved Project Wiki source screen for shared visual styling only; "
+                           "remaining images are the new feature's generated previews in candidate order.\n"
+                           if inherited_candidate and style_reference else "") +
                           json.dumps([{"key": item.key, "name": item.name, "direction": item.direction or item.tagline,
                                        "palette_exploration": plan.palette_exploration,
                                        "palette": item.palette, "composition": item.composition,
@@ -994,7 +1354,8 @@ class HtmlDesigner:
                                        "hero_placement": item.hero_placement,
                                        "preview_asset_id": item.preview_asset_id}
                                       for item in candidates], ensure_ascii=False)),
-                    images=[item["rendered_image"] for item in previews if item.get("rendered_image")],
+                    images=([style_reference["image"]] if inherited_candidate and style_reference else []) +
+                           [item["rendered_image"] for item in previews if item.get("rendered_image")],
                     usage=usage, model=settings.effective_designer_model,
                     timeout_seconds=settings.designer_page_timeout_seconds,
                 )
@@ -1139,15 +1500,25 @@ class HtmlDesigner:
             item["review_notes"] = visual_notes.get(item["key"], [])
 
         await self._usage(run, total_usage, "style_previews")
-        message = (f"Mình chọn **{screen.name}** làm màn hình đại diện vì nó thể hiện rõ nội dung và trải nghiệm của sản phẩm. "
-                   "Ba preview giữ nguyên nội dung màn hình này nhưng trình bày theo ba hướng thị giác khác nhau. "
-                   "Chọn một hướng để áp dụng cho toàn bộ các màn hình đã chốt.")
+        if inherited_candidate:
+            source = f" từ feature **{inherited_source}**" if inherited_source else " từ Project Wiki"
+            message = (
+                f"Màn hình **{screen.name}** được xem trước theo chuẩn **{inherited_candidate.name}**{source}. "
+                "Nội dung và trạng thái vẫn theo BA package của feature hiện tại. "
+                "Chọn **Dùng chuẩn này** để tiếp tục, hoặc xem ba hướng khác nếu muốn đổi phong cách."
+            )
+        else:
+            message = (f"Mình chọn **{screen.name}** làm màn hình đại diện vì nó thể hiện rõ nội dung và trải nghiệm của sản phẩm. "
+                       "Ba preview giữ nguyên nội dung màn hình này nhưng trình bày theo ba hướng thị giác khác nhau. "
+                       "Chọn một hướng để áp dụng cho toàn bộ các màn hình đã chốt.")
         await self._emit(run, "assistant.message", {"intent": "gather", "message": message})
-        public_previews = [{key: value for key, value in item.items() if key not in {"html", "rendered_image"}}
+        public_previews = [{key: value for key, value in item.items() if key not in {"image", "rendered_image", "qa_errors"}}
                            for item in previews]
-        await self._emit(run, "style.previews", {"screen_id": screen.id, "screen_name": screen.name,
-                                                   "screen_purpose": screen.purpose, "platform": platform,
-                                                   "width": width, "options": public_previews})
+        await self._emit(run, "style.inherited.preview" if inherited_candidate else "style.previews", {
+            "screen_id": screen.id, "screen_name": screen.name,
+            "screen_purpose": screen.purpose, "platform": platform, "width": width,
+            "source_feature_title": inherited_source, "options": public_previews,
+        })
         brief.style_preview_shown = True
         await self.store.save_design_brief(session.id, brief)
         await self._stage(run, RunStage.FINISHED, RunStatus.COMPLETED, intent="gather", assistant_message=message)
@@ -1202,8 +1573,15 @@ class HtmlDesigner:
                 profile=knowledge.profile_text(knowledge.product_profile(query)),
                 skill=knowledge.frontend_design_skill(),
                 design_rules=knowledge.ui_ux_design_rules(),
-                palette_rule=("A design system is imported: set `palette` to null and keep its colors."
-                              if imported else "Choose them for this product; the reference palette is a starting point."),
+                palette_rule=(
+                    "An imported design system supplies components and typography. The selected project visual contract "
+                    "is authoritative for palette and shared art direction; use its exact semantic color tokens on every "
+                    "screen and do not substitute imported colors."
+                    if imported and safe_style_contract.get("palette") else
+                    "A design system is imported: set `palette` to null and preserve its colors."
+                    if imported else
+                    "Use the selected project visual contract palette exactly when present; otherwise choose colors for this product."
+                ),
                 design_system=self._design_text(design, query),
                 brief=json.dumps(spec_brief, ensure_ascii=False),
                 style_selection=(f"{brief.style_name}: {safe_style_direction}".strip(": ")
@@ -1243,11 +1621,11 @@ class HtmlDesigner:
             screen.must_show = [item for item in screen.must_show if not _is_conditional_copy(item, approved)]
             screen.sections = [item for item in screen.sections if not _is_conditional_copy(item, approved)]
             screen.data = [item for item in screen.data if not _is_conditional_copy(item, approved)]
-        # The selected option's tokens are authoritative unless the user imported a
-        # design system, which remains the source of truth for brand tokens.
-        if not imported:
-            if contract.get("palette"):
-                spec.design.palette = Palette.model_validate(contract["palette"])
+        # The approved Project Wiki contract is the project-wide source of truth
+        # even when this feature also uses an imported component library.
+        if contract.get("palette"):
+            spec.design.palette = Palette.model_validate(contract["palette"])
+        if not imported or contract:
             spec.design.heading_font = contract.get("heading_font") or spec.design.heading_font
             spec.design.body_font = contract.get("body_font") or spec.design.body_font
             spec.design.radius = contract.get("radius") or spec.design.radius
@@ -1255,7 +1633,7 @@ class HtmlDesigner:
             if safe_style_direction:
                 spec.design.mood = safe_style_direction
         spec.style_direction = safe_style_direction or spec.style_direction
-        theme = None if imported else direction_theme(spec.design.model_dump())
+        theme = direction_theme(spec.design.model_dump()) if (not imported or contract.get("palette")) else None
         await self.store.set_session_visual_theme(session.id, theme)
         run = await self._stage(run, RunStage.REVIEW_SPEC, RunStatus.WAITING_REVIEW, specification=spec)
         await self._emit(run, "review.required", {"checkpoint": "specification", "screens": [s.id for s in spec.screens]})
@@ -1275,9 +1653,41 @@ class HtmlDesigner:
             screen.must_show = [item for item in screen.must_show if not _is_conditional_copy(item, approved)]
             screen.sections = [item for item in screen.sections if not _is_conditional_copy(item, approved)]
             screen.data = [item for item in screen.data if not _is_conditional_copy(item, approved)]
+        # Retry resumes from a persisted UiSpec and skips write_spec. Re-apply
+        # the approved project contract here too, so legacy/stale specs cannot
+        # bypass the Wiki palette when a user retries a failed Build stage.
+        contract = _default_visual_contract(spec.visual_contract, {})
+        if contract.get("palette"):
+            spec.design.palette = Palette.model_validate(contract["palette"])
+            spec.design.heading_font = contract.get("heading_font") or spec.design.heading_font
+            spec.design.body_font = contract.get("body_font") or spec.design.body_font
+            spec.design.radius = contract.get("radius") or spec.design.radius
+            spec.design.density = contract.get("density") or spec.design.density
+            spec.design.mood = contract.get("direction") or contract.get("tagline") or spec.design.mood
+            theme = direction_theme(spec.design.model_dump())
+            await self.store.set_session_visual_theme(session.id, theme)
+            session.visual_theme = theme
         run = await self._stage(run, RunStage.ASSEMBLY, specification=spec)
         design = await design_context(self.store, session)
         targets = [s for s in (screen_ids or [s.id for s in spec.screens]) if spec.screen(s)]
+        inherited_style_key = str(spec.selected_style_key or contract.get("key") or "")
+        target_platforms = {spec.screen(sid).platform for sid in targets if spec.screen(sid)}
+        style_references = {
+            platform: await self._project_wiki_style_reference(
+                session, style_key=inherited_style_key, platform=platform,
+            )
+            for platform in target_platforms
+        }
+        for platform, reference in style_references.items():
+            await self._trace_decision(run, "project_wiki.visual_system", "approved style contract matches current project Wiki",
+                "apply_saved_visual_system" if reference and reference.get("visual_system_source") == "saved"
+                else "apply_approved_source_fallback" if reference else "no_project_wiki_reference", {
+                    "platform": platform,
+                    "wiki_version": reference.get("wiki_version") if reference else None,
+                    "source_feature_title": reference.get("feature_title") if reference else None,
+                    "source_screen_name": reference.get("screen_name") if reference else None,
+                    "visual_system_source": reference.get("visual_system_source") if reference else None,
+                })
         await self._trace_decision(run, "build.targets", "filter requested ids against current specification", "build_selected_screens", {
             "requested_screen_ids": screen_ids, "selected_targets": targets,
             "all_spec_screens": [screen.id for screen in spec.screens],
@@ -1293,7 +1703,8 @@ class HtmlDesigner:
                                                      "index": index, "total": len(targets)})
             current = existing.get(screen_id)
             summaries[screen_id] = await self._build_screen(
-                run, session, spec, screen, design, current.html if current and instruction else "", instruction)
+                run, session, spec, screen, design, current.html if current and instruction else "", instruction,
+                style_reference=style_references.get(screen.platform))
             built_screen_ids.add(screen_id)
 
         limit = asyncio.Semaphore(max(1, self.service.settings.designer_parallel_screens))
@@ -1336,6 +1747,7 @@ class HtmlDesigner:
         lines = ["" if _is_conditional_copy(mood, approved_screen) else mood]
         if d.palette:
             lines.append("Palette: " + ", ".join(f"{k}={v}" for k, v in d.palette.model_dump().items()))
+            lines.append("These semantic palette tokens are the approved project-wide source of truth. Use them consistently on this screen; do not replace them with another palette.")
         lines.append(f"Fonts: headings {d.heading_font}, body {d.body_font}; radius {d.radius}; density {d.density}.")
         if d.do:
             lines.append("Do: " + "; ".join(d.do))
@@ -1343,7 +1755,8 @@ class HtmlDesigner:
             lines.append("Don't: " + "; ".join(d.dont))
         contract = visual_contract if visual_contract is not None else _default_visual_contract(spec.visual_contract, approved_screen)
         for key, label in (("composition", "Composition"), ("surface_language", "Surfaces"),
-                           ("shape_language", "Shape language"), ("hero_placement", "Illustration placement")):
+                           ("shape_language", "Shape language"), ("hero_placement", "Illustration placement"),
+                           ("background_treatment", "Screen background treatment")):
             if contract.get(key):
                 lines.append(f"{label}: {contract[key]}")
         return "\n".join(lines)
@@ -1408,7 +1821,8 @@ class HtmlDesigner:
         return result, "\n".join(lines) or "- none", blocking, score
 
     async def _build_screen(self, run, session, spec: UiSpec, screen: ScreenSpec, design: DesignContext,
-                            current_html: str, instruction: str) -> str:
+                            current_html: str, instruction: str,
+                            *, style_reference: dict[str, Any] | None = None) -> str:
         _TRACE_CONTEXT.set((run, f"screen: {screen.name} ({screen.id})"))
         approved_screen = _approved_source_for_screen(spec, screen.id)
         default_approved_screen = _default_approved_brief(approved_screen)
@@ -1432,8 +1846,15 @@ class HtmlDesigner:
             f"Selected local illustration role for this screen: {screen.visual_asset_role}. "
             "Do not introduce an unrelated stock photo or substitute an illustration for the logo."
         )
+        reference_instruction = self._style_reference_instruction(style_reference)
+        review_reference_instruction = (
+            reference_instruction +
+            "\nFor this review, the first attached image is the current feature screen and the second is the approved Project Wiki source screen."
+            if style_reference else ""
+        )
         system = self.prompts.render(
-            "builder", width=width, direction=self._direction_text(spec, approved_screen, visual_contract),
+            "builder", width=width,
+            direction=self._direction_text(spec, approved_screen, visual_contract) + reference_instruction,
             design_system=self._design_text(design, query), skill=knowledge.frontend_design_skill(),
             design_rules=knowledge.ui_ux_design_rules(), style_asset=style_asset,
         )
@@ -1442,13 +1863,11 @@ class HtmlDesigner:
         timeout = settings.designer_page_timeout_seconds
 
         async def save(html: str, note: str) -> str:
-            html = fragment_of(html)
+            html = _apply_project_wiki_backdrop(html, style_reference)
             if selected_asset_data:
                 html = html.replace("__DESIGNER_SELECTED_STYLE_ASSET__", selected_asset_data)
-            saved = await self.store.save_screen(
-                session.id, screen.id, ScreenWrite(name=screen.name, platform=screen.platform, html=html, note=note[:400]),
-                run_id=run.id, updated_by="designer-agent")
-            await self._emit(run, "screen.saved", {"screen_id": screen.id, "version": saved.version, "note": note[:200]})
+            # Keep drafts local until deterministic and scope/style review pass.
+            # A blocked build must never leave an unapproved screen on the canvas.
             return html
 
         if current_html:
@@ -1474,8 +1893,14 @@ class HtmlDesigner:
                     screen=json.dumps(default_screen, ensure_ascii=False),
                     must_show="; ".join(default_screen.get("must_show", [])) or "(none)",
                     style_asset=style_asset, others=others,
-                    ux="\n".join(f"- {u}" for u in ux), reference="",
+                    ux="\n".join(f"- {u}" for u in ux),
+                    reference=(
+                        "Use the attached Project Wiki screen as a visual style reference only; "
+                        "preserve this screen's BA-approved content and structure."
+                        if style_reference else ""
+                    ),
                 ),
+                images=[style_reference["image"]] if style_reference else None,
                 usage=usage, model=model, timeout_seconds=timeout,
             )
             html = await save(extract_html(draft), "draft")
@@ -1499,8 +1924,11 @@ class HtmlDesigner:
                                          html=html,
                                          approved_screen=json.dumps(default_approved_screen, ensure_ascii=False),
                                          screen_spec=json.dumps(default_screen, ensure_ascii=False),
-                                         visual_contract=json.dumps(visual_contract, ensure_ascii=False)),
-                images=[result.image] if result.image else None, usage=usage, model=model, timeout_seconds=timeout,
+                                         visual_contract=json.dumps(visual_contract, ensure_ascii=False) +
+                                         review_reference_instruction),
+                images=([result.image] if result.image else []) +
+                       ([style_reference["image"]] if style_reference else []),
+                usage=usage, model=model, timeout_seconds=timeout,
             )
             edit = apply_reply(html, reply)
             notes = [f"These edit blocks did not apply: {'; '.join(edit.failed)}."] if edit.failed else []
@@ -1509,7 +1937,8 @@ class HtmlDesigner:
                     "round": round_no + 1, "rewrite": edit.rewrite, "failed_operations": edit.failed,
                 })
                 # Keep an edit only if it does not make the screen worse (lost texts, new blocking errors).
-                candidate = await self._check(edit.html, screen, width, design, session.project_id, approved_screen)
+                candidate_html = await save(edit.html, f"review candidate {round_no + 1}")
+                candidate = await self._check(candidate_html, screen, width, design, session.project_id, approved_screen)
                 if candidate[3] <= score:
                     await self._trace_decision(run, "screen.edit_quality_gate", "candidate score <= accepted score", "accept_candidate", {
                         "previous_score": score, "candidate_score": candidate[3],
@@ -1545,9 +1974,11 @@ class HtmlDesigner:
                     visual_contract=json.dumps(visual_contract, ensure_ascii=False),
                     visible_text=result.text,
                     html=_clip(html, 18_000),
+                    style_reference_instruction=review_reference_instruction,
                 ),
                 schema=_ScreenAudit,
                 image_bytes=result.image,
+                images=[style_reference["image"]] if style_reference else None,
                 model=model,
                 usage=audit_usage,
                 max_attempts=2,
@@ -1593,9 +2024,12 @@ class HtmlDesigner:
                     html=html,
                     approved_screen=json.dumps(default_approved_screen, ensure_ascii=False),
                     screen_spec=json.dumps(default_screen, ensure_ascii=False),
-                    visual_contract=json.dumps(visual_contract, ensure_ascii=False),
+                    visual_contract=json.dumps(visual_contract, ensure_ascii=False) +
+                    review_reference_instruction,
+                    style_reference_instruction=review_reference_instruction,
                 ),
-                images=[result.image] if result.image else None,
+                images=([result.image] if result.image else []) +
+                       ([style_reference["image"]] if style_reference else []),
                 usage=usage,
                 model=model,
                 timeout_seconds=timeout,
@@ -1611,7 +2045,8 @@ class HtmlDesigner:
                 )
                 continue
 
-            candidate = await self._check(edit.html, screen, width, design, session.project_id, approved_screen)
+            candidate_html = await save(edit.html, f"scope/style candidate {repair_round}/3")
+            candidate = await self._check(candidate_html, screen, width, design, session.project_id, approved_screen)
             if candidate[3] > score:
                 await self._trace_decision(run, "screen.scope_repair_quality_gate", "candidate score > accepted score", "reject_repair_keep_previous", {
                     "repair_round": repair_round, "previous_score": score, "candidate_score": candidate[3],
@@ -1654,6 +2089,12 @@ class HtmlDesigner:
                 True,
                 action="Retry the screen build after resolving the reported issues.",
             )
+        saved = await self.store.save_screen(
+            session.id, screen.id,
+            ScreenWrite(name=screen.name, platform=screen.platform, html=html, note="Approved build"),
+            run_id=run.id, updated_by="designer-agent",
+        )
+        await self._emit(run, "screen.saved", {"screen_id": screen.id, "version": saved.version, "note": "approved build"})
         await self._usage(run, usage, f"build:{screen.id}")
         await self._emit(run, "screen.finished", {"screen_id": screen.id})
         return screen.purpose or "Đã dựng xong."

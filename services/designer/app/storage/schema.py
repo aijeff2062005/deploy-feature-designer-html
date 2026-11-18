@@ -94,9 +94,39 @@ CREATE TABLE IF NOT EXISTS design_system_snippets (
   PRIMARY KEY (design_system_id, variant_id)
 );
 CREATE INDEX IF NOT EXISTS idx_ds_snippets_component ON design_system_snippets(design_system_id, component_id);
+-- Project Wiki: the latest human-approved visual baseline reused by later features.
+CREATE TABLE IF NOT EXISTS project_design_wiki (
+  project_id TEXT PRIMARY KEY,
+  version INTEGER NOT NULL DEFAULT 1,
+  baseline_json TEXT NOT NULL,
+  markdown_key TEXT,
+  source_session_id TEXT NOT NULL,
+  source_feature_id TEXT,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS project_design_wiki_versions (
+  project_id TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  baseline_json TEXT NOT NULL,
+  markdown_key TEXT NOT NULL,
+  source_session_id TEXT NOT NULL,
+  source_feature_id TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (project_id, version)
+);
 """
 
 AFTER = (
+    "ALTER TABLE project_design_wiki ADD COLUMN IF NOT EXISTS markdown_key TEXT",
+    """INSERT INTO project_design_wiki_versions
+       (project_id, version, baseline_json, markdown_key, source_session_id, source_feature_id, updated_at)
+       SELECT project_id, version, baseline_json, markdown_key, source_session_id, source_feature_id, updated_at
+       FROM project_design_wiki current
+       WHERE markdown_key IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM project_design_wiki_versions versioned
+           WHERE versioned.project_id=current.project_id AND versioned.version=current.version
+         )""",
     # Columns added by earlier platform versions (no-ops on a new database).
     "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS project_id TEXT",
     "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS created_by TEXT",

@@ -807,8 +807,21 @@ async def event_history(request: Request, run_id: UUID) -> list[dict[str, Any]]:
 
 @router.post("/runs/{run_id}/reviews", status_code=status.HTTP_202_ACCEPTED)
 async def review_run(request: Request, run_id: UUID, body: ReviewCreate) -> dict[str, str]:
-    await request.app.state.runs.review(run_id, body)
+    await request.app.state.runs.review(run_id, body, approved_by=current_username())
     return {"status": "accepted"}
+
+
+@router.get("/runs/{run_id}/project-wiki-preview")
+async def project_wiki_preview(request: Request, run_id: UUID) -> dict[str, Any]:
+    run = await request.app.state.store.get_run(run_id)
+    if run is None:
+        raise not_found("Run")
+    session = await request.app.state.store.get_session(run.session_id)
+    if session is None:
+        raise not_found("Session")
+    if not auth_disabled() or session.project_id:
+        require_project(session.project_id or "")
+    return await request.app.state.runs.project_wiki_preview(run_id, approved_by=current_username())
 
 
 @router.post("/runs/{run_id}/retry", status_code=status.HTTP_202_ACCEPTED)

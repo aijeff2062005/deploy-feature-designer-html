@@ -4,6 +4,7 @@ import { BuildRail } from "./BuildRail";
 import { ChatWorkspace } from "./ChatWorkspace";
 import { openRunStream } from "./events";
 import { ProjectFilesPanel } from "./ProjectFilesPanel";
+import { ProjectDesignWikiPanel } from "./ProjectDesignWikiPanel";
 import { ReviewPanel } from "./ReviewPanel";
 import { SessionRail } from "./SessionRail";
 import { SettingsDrawer } from "./SettingsDrawer";
@@ -18,14 +19,19 @@ export default function App() {
     const [runs, setRuns] = useState<Run[]>([]);
     const [activeRun, setActiveRun] = useState<Run>();
     const [events, setEvents] = useState<WorkflowEvent[]>([]);
+    const [historyEvents, setHistoryEvents] = useState<WorkflowEvent[]>([]);
     const [artifacts, setArtifacts] = useState<RunArtifacts>();
     const [collapsed, setCollapsed] = useState(false);
     const [settingsOpen, setSettingsOpen] = useState(false);
     const [reviewOpen, setReviewOpen] = useState(false);
-    const [rightPanel, setRightPanel] = useState<"workbench" | "files">("workbench");
+    const [rightPanel, setRightPanel] = useState<"workbench" | "files" | "wiki">("workbench");
     const [screensVersion, setScreensVersion] = useState(0);
     const [notice, setNotice] = useState("");
     const { resolvedTheme, toggleTheme } = useTheme();
+    const historyPreviewRunKey = useMemo(
+        () => runs.filter((item) => item.id !== activeRun?.id && item.intent === "gather").map((item) => item.id).join("|"),
+        [runs, activeRun?.id],
+    );
 
     const applyRun = useCallback((updated: Run) => {
         setActiveRun((current) => (current?.id === updated.id ? updated : current));
@@ -36,6 +42,16 @@ export default function App() {
         setActiveSession((current) => (current?.id === updated.id ? updated : current));
         setSessions((current) => current.map((item) => (item.id === updated.id ? updated : item)));
     }, []);
+
+    const createStylePreviews = useCallback(async () => {
+        if (!activeSession) return;
+        const run = await api.createStylePreviews(activeSession.id);
+        setRuns((current) => [run, ...current]);
+        setActiveRun(run);
+        setEvents([]);
+        setArtifacts(undefined);
+        setReviewOpen(false);
+    }, [activeSession]);
 
     useEffect(() => {
         api.listSessions()
@@ -59,6 +75,21 @@ export default function App() {
             })
             .catch((error) => setNotice(error.message));
     }, [activeSession?.id]);
+
+    useEffect(() => {
+        if (!activeSession || !runs.length) {
+            setHistoryEvents([]);
+            return;
+        }
+        let alive = true;
+        const historyPreviewRunIds = historyPreviewRunKey ? historyPreviewRunKey.split("|") : [];
+        Promise.all(historyPreviewRunIds.map((id) => api.eventHistory(id).catch(() => [])))
+            .then((groups) => {
+                if (!alive) return;
+                setHistoryEvents(groups.flat().filter((event) => event.type === "style.previews" || event.type === "style.inherited.preview"));
+            });
+        return () => { alive = false; };
+    }, [activeSession?.id, historyPreviewRunKey]);
 
     useEffect(() => {
         if (!activeRun) return;
@@ -182,6 +213,7 @@ export default function App() {
             setActiveRun(await api.getRun(activeRun.id));
         } catch (error) {
             setNotice((error as Error).message);
+            throw error;
         }
     };
 
@@ -226,8 +258,10 @@ export default function App() {
                 run={activeRun}
                 runs={runs}
                 events={events}
+                historyEvents={historyEvents}
                 busy={busy}
                 onSubmit={submit}
+                onExploreProjectStyles={createStylePreviews}
                 onReview={review}
                 sessionId={activeSession?.id}
                 onOpenCanvas={openCanvas}
@@ -263,7 +297,16 @@ export default function App() {
                 />
             )}
             {reviewOpen && rightPanel === "files" && (
-                <ProjectFilesPanel onShowWorkbench={() => setRightPanel("workbench")} />
+                <ProjectFilesPanel onShowWorkbench={() => setRightPanel("workbench")} onShowWiki={() => setRightPanel("wiki")} />
+            )}
+            {reviewOpen && rightPanel === "wiki" && (
+                <ProjectDesignWikiPanel
+                    projectId={activeSession?.project_id ?? undefined}
+                    sessionId={activeSession?.id}
+                    onShowFiles={() => setRightPanel("files")}
+                    onShowWorkbench={() => setRightPanel("workbench")}
+                    onCreateStylePreviews={createStylePreviews}
+                />
             )}
 
             {notice && (

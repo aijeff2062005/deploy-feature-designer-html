@@ -12,6 +12,9 @@ Generated UI specification (must stay within the user-confirmed brief):
 APPROVED SELECTED STYLE CONTRACT
 {{visual_contract}}
 
+PROJECT WIKI VISUAL REFERENCE RULE
+{{style_reference_instruction}}
+
 VISIBLE RENDERED TEXT
 {{visible_text}}
 
@@ -23,6 +26,7 @@ Return a JSON object matching the supplied schema. Set `ready=false` and give co
 - It adds unsupported factual text such as security/privacy claims, support/contact details, session/account identifiers, policy details, sample personal data, or institutional claims.
 - It omits required content, changes the meaning of an approved action, or displays a behavioral state as if it were the default state.
 - Its visible palette, typography, surface/shape language or composition materially contradicts the selected contract; a control uses an unrelated/default browser color.
+- When a Project Wiki visual reference is attached, the rendered screen materially changes its shared visual language (such as background/motif, surface treatments, typography, controls, spacing rhythm, or visual density). The first image is the current feature screen; the following image is the approved Wiki source screen. Compare shared styling only; feature-specific copy, data, screen purpose, and screen structure must follow the current approved screen.
 - Its selected illustration is missing when the screen specifies a hero/background role, or is used as a logo/avatar/badge, obscures content, or appears on a screen whose role is `none`.
 - The layout has clipping, overlap, severe imbalance, unreadable labels, or touch targets that do not meet the supplied mobile rules.
 - The mobile layout leaves a large unexplained vertical gap between related content because a short page uses `justify-between`/a flex spacer to pin the primary action to the bottom. Keep the main task and its action in a balanced group. Check that the content column is horizontally centered and that labels, fields, and actions share consistent edges; left-aligned text within that centered column is valid when the screen direction calls for it.

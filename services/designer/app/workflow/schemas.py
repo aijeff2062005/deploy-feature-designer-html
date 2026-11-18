@@ -62,6 +62,10 @@ class StylePreviewPlan(BaseModel):
         keys = [item.key for item in self.options]
         if len(set(keys)) != 3:
             raise ValueError("Style preview option keys must be unique")
+        if any(len(item.background_treatment.strip()) < 12 for item in self.options):
+            raise ValueError(
+                "Every style preview option must define a concrete, palette-derived screen background treatment."
+            )
         palette_roles = {
             "primary", "primary_foreground", "background", "foreground", "surface", "muted",
             "muted_foreground", "border", "accent", "success", "warning", "destructive",

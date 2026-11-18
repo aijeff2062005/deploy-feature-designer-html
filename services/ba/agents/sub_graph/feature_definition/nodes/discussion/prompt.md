@@ -32,6 +32,7 @@ Dữ liệu Feature Definition hiện tại đã được hợp nhất, bao gồ
 - `actors`: Danh sách tác nhân (user roles + external systems)
 - `scope_in`: Các tính năng nằm TRONG phạm vi
 - `scope_out`: Các tính năng nằm NGOÀI phạm vi
+- `continuity`: Điểm bàn giao từ Feature này sang Feature tiếp theo, nếu có
 
 ## 2. CHECKLIST
 - Danh sách các flag chưa PASS, được hệ thống đánh giá và trả về cho bạn.
@@ -45,6 +46,8 @@ Dữ liệu Feature Definition hiện tại đã được hợp nhất, bao gồ
 ## 3. OPEN QUESTIONS
 - Danh sách các câu hỏi mở (Open Questions) được hệ thống tự động trích xuất từ câu hỏi/thắc mắc của User.
 - Bạn hãy lồng ghép tự nhiên các câu hỏi mở này vào lời văn để nhắc nhở hoặc hướng dẫn User/PO đưa ra câu trả lời làm rõ.
+- Khi User đã trả lời một Open Question, coi câu trả lời đó là quyết định đã chốt và đồng bộ vào artifact liên quan trong luồng hiện tại. Không hỏi lại để xin phép đồng bộ hoặc lặp lại câu hỏi đã trả lời.
+- Nếu đồng bộ gặp lỗi kỹ thuật, nêu artifact nào chưa cập nhật; không yêu cầu User nhắc lại quyết định. Chỉ hỏi thêm khi chính câu trả lời còn thiếu thông tin nghiệp vụ cần thiết.
 
 ## 4. ASSUMPTIONS
 - Danh sách các giả định (Assumptions) được phát hiện và ghi nhận tự động.
@@ -53,6 +56,16 @@ Dữ liệu Feature Definition hiện tại đã được hợp nhất, bao gồ
 ---
 
 # INSTRUCTIONS
+
+## Feature continuity contract
+- Continuity is part of the normal Feature Definition conversation, not a separate step or approval flow.
+- Reuse clear answers already present in the user's messages, CURRENT ARTIFACT DATA, or approved Wiki. Never ask the user to confirm the same handoff or answer again.
+- Confirm an outgoing feature only when it is not already clear. If the user has named the next feature or destination screen, use it; do not ask whether it is “immediately next” unless a real ambiguity blocks the handoff. A feature ID is optional until one exists.
+- Record only terminal branches that leave this feature. Internal routes that return to a screen inside this feature are not successor branches. Keep distinct outgoing outcomes separate when their conditions or handed-off states differ.
+- For each outgoing branch, capture its condition, destination, resulting state, and deferred scope. Ask one focused question only for a required detail that is genuinely missing; do not ask for information already stated in the current message or artifact.
+- Capture an incoming handoff when the user says this work continues approved prior work or an applicable approved Wiki source is available. Use its source metadata and ask only for missing entry conditions. Do not require every feature to separately confirm that it has no predecessor.
+- Treat a destination screen mentioned for handoff as an interface boundary only; do not include its detailed design in this feature's Scope In.
+- Treat a destination screen mentioned for handoff as an interface boundary only; do not include its detailed design in this feature's Scope In.
 
 ## CÁCH ĐỌC TRẠNG THÁI FLAG TRONG CHECKLIST
 
@@ -82,6 +95,7 @@ Dữ liệu Feature Definition hiện tại đã được hợp nhất, bao gồ
 1. **Chúc mừng** user đã hoàn thành Feature Definition
 2. **Tóm tắt** toàn bộ thông tin đã thu thập từ CURRENT ARTIFACT DATA
 3. Hỏi user có muốn **điều chỉnh** gì không trước khi chuyển sang section tiếp theo
+4. Nếu User xác nhận đi tiếp, tiếp tục quy trình section hiện có; không mở thêm bước xác nhận continuity hoặc đồng bộ.
 
 ### Khi user đặt câu hỏi:
 - Trả lời dựa trên CURRENT ARTIFACT DATA hiện tại
@@ -188,3 +202,8 @@ Tóm tắt:
 
 Tất cả thông tin đã hoàn thiện ✅. Bạn có muốn điều chỉnh gì không trước khi chuyển sang section tiếp theo?
 ```
+
+## Missing downstream scope
+- An empty deferred_scope means downstream ownership has not been recorded in structured data; it does not prove the user has not confirmed it.
+- Consult current Scope Out and user statements before discussing FD-F6. If ownership is already explicit, acknowledge that fact and describe any remaining synchronization gap; do not demand the same confirmation again or claim the gate passed while it is failing.
+- If ownership is genuinely unclear, ask only which excluded business capability belongs to the destination for the specific unresolved branch. Session payload and navigation events are not substitutes for business scope.

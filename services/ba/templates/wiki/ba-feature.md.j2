@@ -1,0 +1,173 @@
+# {{ title }}
+
+{% set feature = sections.get('feature_definition') or {} %}
+{% set workflow = sections.get('workflow') or {} %}
+{% set workflow_md = workflow.get('workflow_md_content') or '' %}
+{% set use_cases = sections.get('use_cases') or {} %}
+{% set cases = use_cases.get('use_cases') or [] %}
+{% set business_rules = sections.get('business_rules') or {} %}
+{% set rules = business_rules.get('business_rules') or [] %}
+{% set ui_section = sections.get('ui_touchpoints') or {} %}
+{% set ui_touchpoints = touchpoints or ui_section.get('ui_touchpoints') or [] %}
+{% set payload = package_payload or {} %}
+{% set questions = payload.get('open_questions') or sections.get('open_questions') or [] %}
+{% set assumptions = payload.get('assumptions') or sections.get('assumptions') or [] %}
+
+## Mục tiêu và mô tả
+
+{{ feature.get('summary') or feature.get('goal') or description }}
+
+{% if feature.get('actors') %}
+## Actors
+
+{% for actor in feature.get('actors') %}- {{ actor }}{{ '\n' }}
+{% endfor %}
+{% endif %}
+
+{% if feature.get('scope_in') %}
+## Trong phạm vi
+
+{% for item in feature.get('scope_in') %}- {{ item }}{{ '\n' }}
+{% endfor %}
+{% endif %}
+
+{% set continuity = feature.get('continuity') or {} %}
+{% if continuity.get('has_successor') is not none or continuity.get('has_predecessor') is not none or continuity.get('predecessor_feature_id') or continuity.get('predecessor_feature_title') or continuity.get('handoffs') or continuity.get('incoming_handoffs') %}
+## Liên kết giữa các feature
+
+{% if continuity.get('has_successor') is sameas true %}
+{% for handoff in continuity.get('handoffs') or [] %}
+### Nhánh {{ loop.index }}
+- Điều kiện: {{ handoff.get('branch_condition', '') }}{{ '\n' }}
+- Feature tiếp nối: {{ handoff.get('successor_feature_title') or handoff.get('successor_feature_id', '') }}{{ '\n' }}
+- End State: {{ handoff.get('exit_state', '') }}{% if handoff.get('exit_state_id') %} (`{{ handoff.get('exit_state_id') }}`){% endif %}{% if handoff.get('workflow_end_state_id') %} → Workflow `{{ handoff.get('workflow_end_state_id') }}`{% endif %}{{ '\n' }}
+{% for item in handoff.get('deferred_scope') or [] %}- Phạm vi để feature tiếp nối xử lý: {{ item }}{{ '\n' }}
+{% endfor %}
+{% endfor %}
+{% if not continuity.get('handoffs') and continuity.get('exit_state') %}
+- Feature tiếp nối: {{ continuity.get('successor_feature_title') or continuity.get('successor_feature_id', '') }}{{ '\n' }}
+- Trạng thái bàn giao: {{ continuity.get('exit_state', '') }}{% if continuity.get('exit_state_id') %} (`{{ continuity.get('exit_state_id') }}`){% endif %}{% if continuity.get('workflow_end_state_id') %} → Workflow `{{ continuity.get('workflow_end_state_id') }}`{% endif %}{{ '\n' }}
+{% endif %}
+{% elif continuity.get('has_successor') is sameas false %}
+- Không khai báo feature tiếp nối.{{ '\n' }}
+{% endif %}
+{% for incoming in continuity.get('incoming_handoffs') or [] %}
+### Đầu vào {{ loop.index }}
+- Feature nguồn: {{ incoming.get('predecessor_feature_title') or incoming.get('predecessor_feature_id', '') }}{% if incoming.get('predecessor_version') %}, version `{{ incoming.get('predecessor_version') }}`{% endif %}{{ '\n' }}
+- End State nguồn: `{{ incoming.get('predecessor_end_state_id', '') }}` — {{ incoming.get('predecessor_end_state', '') }}{{ '\n' }}
+- Điều kiện đầu vào: {{ incoming.get('entry_state', '') }}{{ '\n' }}
+{% endfor %}
+{% if continuity.get('has_predecessor') is false %}- Feature độc lập với các feature trước.{{ '\n' }}
+{% endif %}
+{% if not continuity.get('incoming_handoffs') and (continuity.get('predecessor_feature_id') or continuity.get('predecessor_feature_title')) %}
+- Feature nguồn: {{ continuity.get('predecessor_feature_title') or continuity.get('predecessor_feature_id') }}{% if continuity.get('predecessor_version') %}, version `{{ continuity.get('predecessor_version') }}`{% endif %}{{ '\n' }}
+- End State nguồn: `{{ continuity.get('predecessor_end_state_id', '') }}` — {{ continuity.get('entry_state', '') }}{{ '\n' }}
+{% endif %}
+{% endif %}
+
+{% if cases %}
+## User stories và tiêu chí chấp nhận
+
+{% for case in cases %}
+### {{ case.get('id', 'User story ' ~ loop.index) }}
+
+{{ case.get('statement') or case.get('story') or case.get('description', '') }}
+{% if case.get('actor_id') %}
+- Actor: {{ case.get('actor_id') }}{{ '\n' }}
+{% endif %}{% if case.get('rule_ids') %}- Business Rules: {{ case.get('rule_ids') | join(', ') }}{{ '\n' }}
+{% endif %}{% if case.get('bpmn_node_ids') %}- BPMN nodes: {{ case.get('bpmn_node_ids') | join(', ') }}{{ '\n' }}
+{% endif %}
+{% for criterion in case.get('acceptance_criteria') or [] %}
+{% if criterion is mapping %}- **{{ criterion.get('id', 'AC-' ~ loop.index) }}:** {{ criterion.get('given', '') }}{% if criterion.get('when') %} When {{ criterion.get('when') }}{% endif %}{% if criterion.get('then') %} Then {{ criterion.get('then') }}{% endif %}{% if criterion.get('description') or criterion.get('text') or criterion.get('statement') %} {{ criterion.get('description') or criterion.get('text') or criterion.get('statement') }}{% endif %}{{ '\n' }}
+{% else %}- {{ criterion }}{{ '\n' }}
+{% endif %}
+{% endfor %}
+{% endfor %}
+{% endif %}
+
+{% if rules %}
+## Quy tắc nghiệp vụ
+
+{% for rule in rules %}- **{{ rule.get('id', '') }}:** {{ rule.get('statement') or rule.get('description') or rule.get('rule', '') }}{% if rule.get('source') %} _(Nguồn: {{ rule.get('source') }})_{% endif %}{{ '\n' }}
+{% endfor %}
+{% endif %}
+
+{% if workflow_md %}
+## Workflow
+
+{{ workflow_md }}
+{% else %}
+{% set bpmn = sections.get('bpmn_reference') or {} %}
+{% if bpmn.get('steps') %}
+## Main Flow
+
+{% for step in bpmn.get('steps') %}- **{{ step.get('step', loop.index) }} — {{ step.get('actor', '') }}:** {{ step.get('action', '') }}{% if step.get('br_ref') %} (BR: {{ step.get('br_ref') }}){% endif %}{% if step.get('gateway') %} · Gateway: {{ step.get('gateway') }}{% endif %}{{ '\n' }}
+{% endfor %}
+{% endif %}
+{% if bpmn.get('exceptions') %}
+## Exception Flows
+
+{% for exception in bpmn.get('exceptions') %}{% if exception.get('condition') or exception.get('handling') %}- **{{ exception.get('id', '') }} — {{ exception.get('condition', '') }}:** {{ exception.get('handling', '') }}{{ '\n' }}
+{% endif %}{% endfor %}
+{% endif %}
+{% if bpmn.get('end_states') %}
+## End States
+
+{% for state in bpmn.get('end_states') %}- {{ state }}{{ '\n' }}
+{% endfor %}
+{% endif %}
+{% endif %}
+
+{% if ui_touchpoints %}
+## Điểm chạm giao diện
+
+{% for item in ui_touchpoints %}
+{% if item is mapping %}
+### {{ item.get('id', 'UIT-' ~ loop.index) }} — {{ item.get('name') or item.get('screen') or 'Điểm chạm' }}
+- Màn hình: {{ item.get('screen') or item.get('name', '') }}{{ '\n' }}
+- Actor: {{ item.get('actor', '') }}{{ '\n' }}
+{% if item.get('related_uc_ids') %}- Use case: {{ item.get('related_uc_ids') | join(', ') }}{{ '\n' }}
+{% endif %}{% if item.get('trigger') %}- Trigger: {{ item.get('trigger') }}{{ '\n' }}
+{% endif %}{% if item.get('goal') %}- Mục tiêu: {{ item.get('goal') }}{{ '\n' }}
+{% endif %}{% if item.get('interaction') %}- Tương tác: {{ item.get('interaction') }}{{ '\n' }}
+{% endif %}{% if item.get('notes') %}- Ghi chú: {{ item.get('notes') }}{{ '\n' }}
+{% endif %}{% if item.get('bpmn_node_id') %}- BPMN node: `{{ item.get('bpmn_node_id') }}`{{ '\n' }}
+{% endif %}
+{% else %}- {{ item }}{{ '\n' }}
+{% endif %}
+{% endfor %}
+{% endif %}
+
+{% if questions or assumptions %}
+## Câu hỏi mở và giả định
+
+{% for item in questions %}
+{% if item is mapping %}- **{{ item.get('id', 'Câu hỏi') }}:** {{ item.get('question') or item.get('text') or item.get('statement', '') }}{% if item.get('severity') %} _(Mức độ: {{ item.get('severity') }})_{% endif %}{% if item.get('assigned_to') %} _(Phụ trách: {{ item.get('assigned_to') }})_{% endif %}{% if item.get('status') %} _(Trạng thái: {{ item.get('status') }})_{% endif %}{% if item.get('impact') %} — Ảnh hưởng: {{ item.get('impact') }}{% endif %}{% if item.get('affected_artifacts') %} — Artifact liên quan: {% for ref in item.get('affected_artifacts') %}{% if ref is mapping %}{{ ref.get('artifact_type', '') }}: {{ ref.get('artifact_id', '') }}{% if ref.get('reason') %} ({{ ref.get('reason') }}){% endif %}{% if ref.get('oq_id') %} [{{ ref.get('oq_id') }}]{% endif %}{% else %}{{ ref }}{% endif %}{% if not loop.last %}; {% endif %}{% endfor %}{% endif %}{{ '\n' }}
+{% else %}- {{ item }}{{ '\n' }}
+{% endif %}
+{% endfor %}
+{% for item in assumptions %}{% if item is mapping %}- **{{ item.get('id', 'Giả định') }}:** {{ item.get('statement') or item.get('text', '') }}{{ '\n' }}
+{% else %}- **Giả định:** {{ item }}{{ '\n' }}
+{% endif %}{% endfor %}
+{% endif %}
+
+{% if payload.get('reference_assets') %}
+## Tài liệu tham chiếu
+
+{% for ref in payload.get('reference_assets') %}- {% if ref is mapping %}{{ ref.get('title') or ref.get('name') or ref.get('filename') or ref.get('uri') or ref.get('url') or ref }}{% if ref.get('description') %}: {{ ref.get('description') }}{% endif %}{% else %}{{ ref }}{% endif %}{{ '\n' }}
+{% endfor %}
+{% endif %}
+
+{% if feature.get('scope_out') %}
+## Ngoài phạm vi
+
+{% for item in feature.get('scope_out') %}- {{ item }}{{ '\n' }}
+{% endfor %}
+{% endif %}
+
+## Nguồn BA
+
+- Feature ID: `{{ feature_id }}`
+- BA package version: `{{ version }}`
+- Source artifact: `{{ artifact_id }}`
+- Source JSON: `{{ storage_key }}`

@@ -40,6 +40,18 @@ class SequentialOpenQuestionInputTests(unittest.TestCase):
             ["pending", "pending", "pending"],
         )
 
+    def test_markdown_wrapped_inline_answers_are_split_without_following_request(self) -> None:
+        answers = resolutions_from_user_message(
+            "Resolve `OQ-101`: Rotate the token after the retry limit. "
+            "- `OQ-205`: Keep the source record unchanged. "
+            "- `OQ-9`: Return to the prior state.  2. CREATE A NEW STORY: continue later."
+        )
+
+        self.assertEqual([item["id"] for item in answers], ["OQ-101", "OQ-205", "OQ-9"])
+        self.assertEqual(answers[0]["answer"], "Rotate the token after the retry limit.")
+        self.assertEqual(answers[1]["answer"], "Keep the source record unchanged.")
+        self.assertEqual(answers[2]["answer"], "Return to the prior state.")
+
     def test_single_answer_keeps_other_questions_open_for_follow_up(self) -> None:
         state = _state()
         answers = resolutions_from_user_message("OQ-002: Require at least 10 characters.")

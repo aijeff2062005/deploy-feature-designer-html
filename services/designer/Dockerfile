@@ -13,6 +13,8 @@ ENV PIP_CONSTRAINT=/opt/constraints.txt
 
 COPY packages/platform_core /opt/platform/packages/platform_core
 RUN pip install --no-cache-dir /opt/platform/packages/platform_core
+COPY packages/wiki /opt/platform/packages/wiki
+ENV PYTHONPATH="/opt/platform/packages/wiki:${PYTHONPATH}"
 
 # Headless Chromium for rendering screens (shell build only), before the other dependencies
 # so changing requirements.txt does not download the browser again.

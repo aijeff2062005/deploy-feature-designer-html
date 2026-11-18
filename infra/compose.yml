@@ -1,5 +1,26 @@
 # Shared infrastructure. Values come from platform/.env (see include env_file).
 services:
+  basic-memory:
+    image: ${BASIC_MEMORY_IMAGE:-ghcr.io/basicmachines-co/basic-memory:latest}
+    environment:
+      BASIC_MEMORY_PROJECT_ROOT: /app/data
+      BASIC_MEMORY_INDEX_CHANGES: "true"
+      BASIC_MEMORY_LOG_LEVEL: ${BASIC_MEMORY_LOG_LEVEL:-INFO}
+      BASIC_MEMORY_INDEX_DELAY: "1000"
+    volumes:
+      - platform-storage:/app/data:rw
+      - basic-memory-config:/home/appuser/.basic-memory:rw
+    command: ["basic-memory", "mcp", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test: ["CMD", "basic-memory", "--version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - wiki-index
+
   postgres:
     image: postgres:16-alpine
     environment:
@@ -22,3 +43,8 @@ volumes:
   pgdata:
   # File storage shared by every module; keys follow the S3 layout.
   platform-storage:
+  basic-memory-config:
+
+networks:
+  wiki-index:
+    internal: true

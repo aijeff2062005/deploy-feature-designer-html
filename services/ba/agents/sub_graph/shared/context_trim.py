@@ -14,6 +14,7 @@ def trim_feature_definition(fd: Any, *, max_items: int = 12) -> dict[str, Any]:
         "actors": _take_list(fd.get("actors"), max_items),
         "scope_in": _take_list(fd.get("scope_in"), max_items),
         "scope_out": _take_list(fd.get("scope_out"), max_items),
+        "continuity": fd.get("continuity") or {},
     }
 
 

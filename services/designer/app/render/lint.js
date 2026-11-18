@@ -178,6 +178,20 @@ async ({ mobile, axe, strictTouchTargets = false, strictVisualQuality = false, r
   });
   add("warning", "empty-region", "Large empty box: fill it with content or remove it.", empty);
 
+  if (strictVisualQuality) {
+    const canvasArea = Math.max(1, window.innerWidth * Math.min(window.innerHeight, document.documentElement.scrollHeight));
+    const backgroundArt = all.filter((el) => {
+      if (!el.hasAttribute("data-preview-background")) return false;
+      const rect = visibleBounds(el);
+      if (!rect || (rect.right - rect.left) * (rect.bottom - rect.top) < canvasArea * 0.18) return false;
+      const style = getComputedStyle(el);
+      return style.backgroundImage !== "none" || el.matches("svg,img,canvas") || Boolean(el.querySelector("svg,img,canvas"));
+    });
+    add("error", "background-treatment",
+      "The screen is missing a substantial designed background layer. Add a palette-derived gradient/texture or inline SVG inside a dedicated data-preview-background layer covering at least 18% of the canvas, behind readable content.",
+      backgroundArt.length ? [] : [document.body]);
+  }
+
   const broken = [...document.images].filter((img) => img.complete && img.naturalWidth === 0);
   add("error", "broken-image", "Image failed to load.", broken);
 

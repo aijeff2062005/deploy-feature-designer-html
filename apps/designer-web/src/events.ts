@@ -3,7 +3,7 @@ import type { WorkflowEvent } from "./types";
 
 const EVENT_TYPES = [
   "run.created", "run.finished", "run.failed", "run.cancelled", "stage.changed",
-  "assistant.message", "style.previews", "specification.ready", "review.required", "review.accepted",
+  "assistant.message", "style.previews", "style.inherited.preview", "specification.ready", "review.required", "review.accepted",
   "review.changes_requested", "review.recorded", "action.required", "run.retrying",
   "screen.started", "screen.saved", "screen.finished", "screen.warning", "llm.usage",
   "debug.step.started", "debug.step.completed", "debug.step.failed",

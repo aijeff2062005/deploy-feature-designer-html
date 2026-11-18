@@ -17,7 +17,14 @@ const inline = (line) =>
     .replace(/__(.+?)__/g, '<strong>$1</strong>')
     .replace(/(^|[\s(])\*([^*\s][^*]*?)\*(?=[\s).,;:!?]|$)/g, '$1<em>$2</em>')
     .replace(/~~(.+?)~~/g, '<del>$1</del>')
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    .replace(/\[([^\]]+)\]\(([^\s)]+)\)/g, (match, label, href) => {
+      const scheme = href.match(/^([a-z][a-z0-9+.-]*):/i)?.[1]?.toLowerCase();
+      if (!scheme) return `<span class="md-link-ref">${label}</span>`;
+      if (scheme === 'http' || scheme === 'https') {
+        return `<a href="${href}" target="_blank" rel="noopener">${label}</a>`;
+      }
+      return match;
+    });
 
 const cells = (row) => row.replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
 const isTableRule = (row) => /^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?$/.test(row.trim());

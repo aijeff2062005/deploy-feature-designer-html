@@ -64,7 +64,12 @@ def _preserve_omitted_workflows(previous: str, updated: str) -> tuple[str, list[
 async def wf_merge_callback(
     callback_context: CallbackContext, llm_response: LlmResponse
 ) -> None:
-    parsed_dict = parse_str_to_dict(llm_response.content.parts[0].text)
+    response_text = "\n".join(
+        str(part.text or "")
+        for part in (llm_response.content.parts if llm_response.content else [])
+        if getattr(part, "text", None)
+    )
+    parsed_dict = parse_str_to_dict(response_text)
     if not parsed_dict:
         return
     try:
@@ -90,8 +95,39 @@ async def wf_merge_callback(
     if parsed.workflow_md_path:
         wf["workflow_md_path"] = parsed.workflow_md_path
     artifacts["workflow"] = wf
+    mapping_changed = False
+    if parsed.handoff_mappings:
+        from managers.control.bpmn import parse_workflow_steps
+
+        fd = dict(artifacts.get("feature_definition") or {})
+        continuity = dict(fd.get("continuity") or {})
+        handoffs = [dict(item) for item in continuity.get("handoffs") or []]
+        parsed_ids = parse_workflow_steps(wf.get("workflow_md_content") or "").get(
+            "end_state_ids", []
+        )
+        for mapping in parsed.handoff_mappings:
+            index = mapping.handoff_index - 1
+            requested_id = mapping.workflow_end_state_id.strip()
+            matches = [
+                state_id for state_id in parsed_ids
+                if str(state_id).strip().casefold() == requested_id.casefold()
+            ]
+            if index >= len(handoffs) or len(matches) != 1:
+                continue
+            canonical_id = str(matches[0]).strip()
+            if handoffs[index].get("workflow_end_state_id") != canonical_id:
+                handoffs[index]["workflow_end_state_id"] = canonical_id
+                mapping_changed = True
+
+        if mapping_changed:
+            continuity["handoffs"] = handoffs
+            if len(handoffs) == 1:
+                continuity["workflow_end_state_id"] = handoffs[0]["workflow_end_state_id"]
+            fd["continuity"] = continuity
+            artifacts["feature_definition"] = fd
+
     state["artifacts"] = artifacts
-    if content_changed:
+    if content_changed or mapping_changed:
         mark_downstream_needs_review(state, "workflow")
         state["_ba_workflow_changed_turn"] = state.get("current_turn")
         if preserved:
@@ -141,9 +177,11 @@ async def wf_flags_after(
 ) -> None:
     from agents.sub_graph.shared.semantic_flags import apply_semantic_flag_evaluations
 
-    text = ""
-    if llm_response.content and llm_response.content.parts:
-        text = llm_response.content.parts[0].text or ""
+    text = "\n".join(
+        str(part.text or "")
+        for part in (llm_response.content.parts if llm_response.content else [])
+        if getattr(part, "text", None)
+    )
     apply_semantic_flag_evaluations(callback_context.state, "wf", text)
 
 
@@ -198,54 +236,75 @@ async def wf_discussion_inject(
         f"=== CHECKLIST ===\n{json.dumps(checklist, ensure_ascii=False, indent=2)}\n\n"
         f"=== PACKAGE CHANGE REVIEW (deterministic checks; source of truth) ===\n{json.dumps(callback_context.state.get('_ba_change_review') or {}, ensure_ascii=False, indent=2)}\n\n"
         f"=== OPEN QUESTIONS ===\n{json.dumps(trim_open_items(callback_context.state.get('open_questions', [])), ensure_ascii=False)}\n\n"
-        f"=== ASSUMPTIONS ===\n{json.dumps(trim_open_items(callback_context.state.get('assumptions', [])), ensure_ascii=False)}",
+        f"=== ASSUMPTIONS ===\n{json.dumps(trim_open_items(callback_context.state.get('assumptions', [])), ensure_ascii=False)}\n\n"
+        f"=== OQ SYNC RESULT ===\n{json.dumps(callback_context.state.get('_oq_sync_result') or {}, ensure_ascii=False)}\n"
+        f"=== EXPLICIT OQ ANSWER IDS THIS TURN ===\n{json.dumps(callback_context.state.get('_oq_user_explicit_answer_ids') or [], ensure_ascii=False)}",
     )
 
 
 async def wf_change_review_after(
     callback_context: CallbackContext, llm_response: LlmResponse
 ) -> None:
-    """Append an authoritative, deterministic package review to the chat reply."""
-    review = callback_context.state.get("_ba_change_review") or {}
-    if (
-        review.get("edited_section") != "workflow"
-        or review.get("turn") != callback_context.state.get("current_turn")
-        or not llm_response.content
-        or not llm_response.content.parts
-    ):
+    """Append authoritative package and explicit OQ synchronization status."""
+    state = callback_context.state
+    review = state.get("_ba_change_review") or {}
+    review_is_current = (
+        review.get("edited_section") == "workflow"
+        and review.get("turn") == state.get("current_turn")
+    )
+    oq_result = state.get("_oq_sync_result") or {}
+    explicit_oq_ids = state.get("_oq_user_explicit_answer_ids") or []
+    oq_sync_is_current = bool(explicit_oq_ids) and oq_result.get("turn") == state.get("current_turn")
+    if not llm_response.content or not llm_response.content.parts:
         return
 
-    failed = review.get("failed_checks") or []
-    warnings = review.get("warnings") or []
-    lines = ["\n\n**Rà soát package sau khi sửa Workflow:**"]
-    if failed:
-        lines.append("Còn lỗi cần xử lý; chưa nên bấm Validate:")
-        for finding in failed:
-            lines.append(
-                f"- **{finding.get('check_id', '')} {finding.get('name', '')}:** "
-                f"{finding.get('detail', '')}"
+    lines: list[str] = []
+    if review_is_current:
+        failed = review.get("failed_checks") or []
+        warnings = review.get("warnings") or []
+        lines.append("\n\n**Deterministic Workflow package review:**")
+        if failed:
+            lines.append("Required checks remain; do not advance or validate:")
+            for finding in failed:
+                lines.append(
+                    f"- **{finding.get('check_id', '')} {finding.get('name', '')}:** "
+                    f"{finding.get('detail', '')}"
+                )
+                if finding.get("suggestion"):
+                    lines.append(f"  Suggestion: {finding['suggestion']}")
+        else:
+            lines.append("No blocking package findings were detected. This is not a completed Validate run.")
+        if warnings:
+            lines.append("Warnings:")
+            for finding in warnings:
+                lines.append(
+                    f"- **{finding.get('check_id', '')} {finding.get('name', '')}:** "
+                    f"{finding.get('detail', '')}"
+                )
+        preserved = review.get("preserved_workflows") or []
+        if preserved:
+            lines.append("Other workflow blocks preserved: " + ", ".join(f"`{item}`" for item in preserved) + ".")
+
+    if oq_sync_is_current:
+        questions = {
+            str(item.get("id") or "").upper(): item
+            for item in (state.get("open_questions") or [])
+            if isinstance(item, dict)
+        }
+        lines.append("\n\n**Open Question sync status (from saved state):**")
+        for oq_id in explicit_oq_ids:
+            item = questions.get(str(oq_id).upper(), {})
+            status = str(item.get("status") or "open").lower()
+            sync_status = str(item.get("sync_status") or "").lower()
+            label = (
+                "resolved and synchronized"
+                if status == "resolved" and sync_status == "verified"
+                else f"status={status}, sync={sync_status or 'not verified'}"
             )
-            if finding.get("suggestion"):
-                lines.append(f"  Gợi ý: {finding['suggestion']}")
-    else:
-        lines.append(
-            "Rà soát nhất quán giữa các artifact BA không thấy lỗi chặn. "
-            "Package sẵn sàng để bạn chạy Validate; đây chưa phải kết quả Validate chính thức."
-        )
-    if warnings:
-        lines.append("Cảnh báo cần lưu ý:")
-        for finding in warnings:
-            lines.append(
-                f"- **{finding.get('check_id', '')} {finding.get('name', '')}:** "
-                f"{finding.get('detail', '')}"
-            )
-    preserved = review.get("preserved_workflows") or []
-    if preserved:
-        lines.append(
-            "Các workflow khác được giữ nguyên trong artifact: "
-            + ", ".join(f"`{item}`" for item in preserved)
-            + "."
-        )
+            lines.append(f"- {oq_id}: {label}")
+
+    if not lines:
+        return
     llm_response.content.parts[0].text = (
         (llm_response.content.parts[0].text or "") + "\n".join(lines)
     )
@@ -272,6 +331,8 @@ _wf_extractor = LlmAgent(
         "Actors phải khớp FD actors (sẽ thành lanes). "
         "Main Flow ≥3 bước, Exception Flows, End States. "
         "Không lặp lại toàn bộ BR — chỉ tham chiếu BR-XX."
+        "When the user confirms a handoff-to-End-State mapping, return it in handoff_mappings with a 1-based handoff_index and the exact Workflow End State ID. "
+        "Never copy exit_state_id into workflow_end_state_id unless that exact ID exists in Workflow End States. Do not guess ambiguous mappings."
     ),
     output_schema=WorkflowData,
     before_model_callback=[
@@ -306,6 +367,9 @@ _wf_discussion = LlmAgent(
         "Không dùng mã flag kỹ thuật (WF-F1…) trong câu trả lời User. "
         "Nhắc OQ/Assumptions nếu có. "
         "After every Workflow change, read PACKAGE CHANGE REVIEW (deterministic checks) and review all existing workflows, BR references, User Stories, BPMN, and UI Touchpoints. Report concrete findings and affected sections. If failed_checks is non-empty, do not claim the package is okay and do not ask the user to Validate; guide them to fix the listed findings. Only when failed_checks is empty may you say the package is ready for the user to run Validate. Never claim that Validate has already run. "
+        "When FEATURE DEFINITION.continuity.has_successor is true, include an explicit End States table with IDs and describe each distinct terminal branch separately. Every continuity.handoffs record must match exactly one End State; do not collapse branches or invent destinations. Ask the user to resolve missing/mismatched branches before completion. Keep successor detailed screens outside this feature's scope. "
+        "Keep continuity `exit_state_id` (handoff outcome identity) separate from `workflow_end_state_id` (the referenced ID in the Workflow End States). Preserve user-provided End State IDs; never rename them or overwrite `exit_state_id` to force a match. Use an explicit `workflow_end_state_id` mapping when available, and only report WF-F6 from the deterministic package review. "
+        "If the user confirms a handoff-to-End-State mapping, include it in the extractor's `handoff_mappings` output so it is saved into Feature Definition.continuity.handoffs. Only map to an exact ID present in Workflow End States; never claim a Feature Definition mapping was saved unless that structured field was returned and persisted. If the destination is ambiguous, ask the user instead of guessing. "
         "You have tools: wiki first (`wiki.search_pages` / `wiki.fetch_page`); "
         "do NOT `web_search` for FD scope_out / non-goals / unrelated browsing; "
         "`web_search` only after wiki miss for in-package clarification; "

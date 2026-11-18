@@ -52,12 +52,16 @@ services:
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
+      BASIC_MEMORY_MCP_URL: http://basic-memory:8000/mcp
     volumes:
       - platform-storage:/data/storage
+      - ../../scripts:/opt/platform/scripts:ro
       - ../../logs:/logs                    # platform/logs/designer-api/
       - huly-uploads:/tmp/huly-uploads
     depends_on:
       postgres:
+        condition: service_healthy
+      basic-memory:
         condition: service_healthy
       huly-mcp:
         condition: service_healthy
@@ -70,6 +74,9 @@ services:
       retries: 24
       start_period: 20s
     restart: unless-stopped
+    networks:
+      - default
+      - wiki-index
 
   designer-web:
     build:

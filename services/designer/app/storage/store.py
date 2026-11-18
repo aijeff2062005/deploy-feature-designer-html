@@ -689,6 +689,156 @@ class Store:
             (json.dumps(theme) if theme else None, utc_now().isoformat(), str(session_id)),
         )
 
+    async def get_project_design_wiki(self, project_id: str) -> dict[str, Any] | None:
+        row = await self._fetchone(
+            "SELECT version, baseline_json, source_session_id, source_feature_id, updated_at "
+            "FROM project_design_wiki WHERE project_id=?", (project_id,),
+        )
+        if row is None:
+            return None
+        current_baseline = json.loads(row["baseline_json"])
+        try:
+            from wiki.project_files import ProjectFileWiki
+
+            files = ProjectFileWiki()
+            if files.exists(project_id, "design-system/design-system.json"):
+                current_baseline = json.loads(
+                    files.read(project_id, "design-system/design-system.json").decode("utf-8")
+                )
+        except Exception:
+            logger.exception("Could not read canonical Design Wiki JSON for %s; using metadata cache", project_id)
+        versions = await self._fetchall(
+            "SELECT version, baseline_json, source_session_id, source_feature_id, updated_at "
+            "FROM project_design_wiki_versions WHERE project_id=? ORDER BY version DESC",
+            (project_id,),
+        )
+        version_items = []
+        for item in versions:
+            version_baseline = json.loads(item["baseline_json"])
+            try:
+                from wiki.project_files import ProjectFileWiki
+
+                path = f"design-system/design-system.v{int(item['version']):04d}.json"
+                files = ProjectFileWiki()
+                if files.exists(project_id, path):
+                    version_baseline = json.loads(files.read(project_id, path).decode("utf-8"))
+            except Exception:
+                logger.exception("Could not read Designer Wiki JSON v%s for %s; using metadata cache",
+                                 item["version"], project_id)
+            version_items.append({**dict(item), "baseline": version_baseline})
+        return {
+            "version": row["version"],
+            "baseline": current_baseline,
+            "source_session_id": row["source_session_id"],
+            "source_feature_id": row["source_feature_id"],
+            "updated_at": row["updated_at"],
+            "versions": version_items,
+        }
+
+    async def approve_project_design_baseline(
+        self, project_id: str, baseline: dict[str, Any], markdown: str, session_id: UUID,
+        source_feature_id: str | None = None, approved_by: str | None = None,
+        approved_at: str | None = None, expected_version: int | None = None,
+    ) -> int:
+        """Promote the approved visual contract to the project's reusable Wiki baseline."""
+        now = approved_at or utc_now().isoformat()
+        def save() -> int:
+            with self._pool.connection() as db:
+                row = db.execute(self._sql(
+                    "SELECT version FROM project_design_wiki WHERE project_id=? FOR UPDATE"
+                ), (project_id,)).fetchone()
+                version = int(row["version"]) + 1 if row else 1
+                if expected_version is not None and version != expected_version:
+                    raise ValueError(
+                        f"Project Wiki changed after preview (expected v{expected_version}, next is v{version})"
+                    )
+                from platform_core.storage import get_storage
+                from .layout import project_design_wiki_key
+
+                markdown_key = project_design_wiki_key(project_id, version)
+                get_storage().put(markdown_key, markdown.encode("utf-8"), content_type="text/markdown; charset=utf-8")
+                from wiki.project_files import ProjectFileWiki
+
+                files = ProjectFileWiki()
+                project_payload = {
+                    **baseline,
+                    "schema_version": "1.0",
+                    "project_id": project_id,
+                    "version": version,
+                    "status": "approved",
+                    "approved_by": approved_by or "human-review",
+                    "approved_at": now,
+                    "source_session_id": str(session_id),
+                    "source_feature_id": source_feature_id,
+                }
+                files.write_json(project_id, f"design-system/design-system.v{version:04d}.json", project_payload)
+                files.write_json(project_id, "design-system/design-system.json", project_payload)
+                files.write_markdown(
+                    project_id, "design-system.md", title="Project Design System",
+                    document_type="design_system", version=str(version), status="approved", body=markdown,
+                    metadata={"source_session_id": str(session_id), "source_feature_id": source_feature_id,
+                              "approved_by": project_payload["approved_by"], "approved_at": now},
+                )
+                files.write_markdown(
+                    project_id, f"history/design-system/v{version:04d}.md", title="Project Design System",
+                    document_type="design_system", version=str(version), status="approved", body=markdown,
+                    metadata={"source_session_id": str(session_id), "source_feature_id": source_feature_id,
+                              "approved_by": project_payload["approved_by"], "approved_at": now},
+                )
+                payload = json.dumps(baseline, ensure_ascii=False)
+                db.execute(self._sql(
+                    "INSERT INTO project_design_wiki_versions "
+                    "(project_id, version, baseline_json, markdown_key, source_session_id, source_feature_id, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)"
+                ), (project_id, version, payload, markdown_key, str(session_id), source_feature_id, now))
+                db.execute(self._sql(
+                    "INSERT INTO project_design_wiki "
+                    "(project_id, version, baseline_json, markdown_key, source_session_id, source_feature_id, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(project_id) DO UPDATE SET "
+                    "version=EXCLUDED.version, baseline_json=EXCLUDED.baseline_json, "
+                    "markdown_key=EXCLUDED.markdown_key, "
+                    "source_session_id=EXCLUDED.source_session_id, source_feature_id=EXCLUDED.source_feature_id, "
+                    "updated_at=EXCLUDED.updated_at"
+                ), (project_id, version, payload, markdown_key,
+                    str(session_id), source_feature_id, now))
+                return version
+        return await self._call(save)
+
+    async def restore_project_design_wiki(
+        self, project_id: str, version: int, *, approved_by: str | None = None,
+    ) -> int:
+        row = await self._fetchone(
+            "SELECT baseline_json, markdown_key, source_session_id, source_feature_id "
+            "FROM project_design_wiki_versions WHERE project_id=? AND version=?",
+            (project_id, version),
+        )
+        if row is None:
+            raise ValueError(f"Project Design Wiki version {version} was not found")
+        baseline = json.loads(row["baseline_json"])
+        markdown = None
+        try:
+            from wiki.project_files import ProjectFileWiki
+
+            files = ProjectFileWiki()
+            version_path = f"design-system/design-system.v{version:04d}.json"
+            if files.exists(project_id, version_path):
+                baseline = json.loads(files.read(project_id, version_path).decode("utf-8"))
+            markdown_path = f"history/design-system/v{version:04d}.md"
+            if files.exists(project_id, markdown_path):
+                content = files.read(project_id, markdown_path).decode("utf-8")
+                parts = content.split("---", 2)
+                markdown = parts[2].strip() if len(parts) == 3 else content
+        except Exception:
+            logger.exception("Could not restore from Designer Wiki files for %s v%s", project_id, version)
+        if markdown is None:
+            from platform_core.storage import get_storage
+
+            markdown = get_storage().get(row["markdown_key"]).decode("utf-8")
+        return await self.approve_project_design_baseline(
+            project_id, baseline, markdown,
+            UUID(row["source_session_id"]), row["source_feature_id"], approved_by=approved_by or "restore",
+        )
+
     async def set_session_design_system(self, session_id: UUID, ds_id: str | None) -> None:
         await self._execute(
             "UPDATE sessions SET design_system_id=?, updated_at=? WHERE id=?",

@@ -1,5 +1,9 @@
 # Wiki Knowledge MVP
 
+> Platform note: although this package retains SQLite-compatible interfaces from its MVP,
+> the deployed platform adapter stores Wiki rows in PostgreSQL (`wiki` schema). Project
+> Markdown/JSON files and Basic Memory indexing are described in the repository root README.
+
 Local learning build of **UAPDF-WKM-001**. Not production Factory. No Knowledge Graph, no vector DB. LLM may **sort DRAFT** only — never paraphrase extract.
 
 ## Run (Makefile only)
@@ -17,7 +21,7 @@ In the UI: approve drafts, search approved.
 ```bash
 make seed-approve   # skip UI; pages already approved
 make test
-make mcp            # stdio MCP, same SQLite
+make mcp            # stdio MCP, same Wiki service/store
 make clean          # wipe DB/blobs; keep venv
 ```
 
@@ -44,7 +48,7 @@ Live smoke (optional): `WIKI_LLM_LIVE=1 WIKI_LLM_API_KEY=… make test`.
 
 | Doc | Code |
 |---|---|
-| Hình 1 — three stores, Gateway = MCP | `config/manifest.json` is Skill/tool assignment (not wiki pages). Wiki is SQLite. |
+| Hình 1 — three stores, Gateway = MCP | `config/manifest.json` is Skill/tool assignment (not wiki pages). Platform Wiki rows use PostgreSQL. |
 | Hình 2 — UI → FastAPI → DB; agent MCP fetch | `wiki/http_app.py`, `wiki/mcp_server.py`, `wiki/service.py` |
 | Hình 3 — tool → Manifest → audit → same DB | `permissions.py`, `audit.py` (JSONL, not a 4th wiki table) |
 | 3 tables | `wiki/db.py` |
@@ -55,7 +59,7 @@ HTTP and MCP are two adapters. Agents never SQL. `wiki.approve_page` is HTTP/hum
 
 ## Flow
 
-Two callers, one `WikiService`, one SQLite. Gateway = MCP wrap (no extra store).
+Two callers, one `WikiService`, one PostgreSQL-backed Wiki store. Gateway = MCP wrap (no extra store).
 
 ```mermaid
 flowchart TB
@@ -104,7 +108,7 @@ sequenceDiagram
   participant HTTP as FastAPI
   participant MCP as Wiki_MCP
   participant Svc as wiki.service
-  participant DB as SQLite
+  participant DB as PostgreSQL_Wiki_schema
 
   Human->>HTTP: POST /v1/wiki/sources PDF
   HTTP->>Svc: ingest_source

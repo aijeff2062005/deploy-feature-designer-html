@@ -16,7 +16,7 @@ export type ProjectDetail = ProjectSummary & { members: Member[] };
 
 export type Artifact = {
   id: string;
-  kind: "ba_package" | "bpmn" | "ui_spec" | "designer_output";
+  kind: "ba_package" | "bpmn" | "ui_spec" | "designer_output" | "project_design_wiki";
   source_module: string;
   source_ref: string;
   version: number;

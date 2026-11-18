@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from agents.ba_agent.constants import STATE_FEATURE_STATUS
-from managers.control.bpmn import ensure_bpmn_artifact
+from managers.control.bpmn import ensure_bpmn_artifact, parse_workflow_steps
 from managers.control.envelope import (
     AGENT_BA,
     AGENT_DESIGNER,
@@ -104,6 +104,38 @@ def build_export_envelope(state: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _clean_export_artifacts(envelope: dict[str, Any], state: dict[str, Any]) -> None:
+    """Keep Designer-facing summaries aligned with parsed workflow sections."""
+    payload = envelope.get("payload")
+    artifacts = payload.get("artifacts") if isinstance(payload, dict) else None
+    state_artifacts = state.get("artifacts") or {}
+    if not isinstance(artifacts, dict):
+        return
+    workflow = state_artifacts.get("workflow") or {}
+    workflow_md = str(workflow.get("workflow_md_content") or "") if isinstance(workflow, dict) else ""
+    if workflow_md:
+        parsed = parse_workflow_steps(workflow_md)
+        bpmn = artifacts.get("bpmn_reference")
+        if isinstance(bpmn, dict):
+            bpmn["steps"] = parsed["steps"]
+            bpmn["exceptions"] = parsed["exceptions"]
+            bpmn["end_states"] = parsed["end_states"]
+    cases = state_artifacts.get("use_cases") or []
+    feature_definition = state_artifacts.get("feature_definition") or {}
+    from managers.control.touchpoints import sanitize_touchpoints
+
+    touchpoints = artifacts.get("ui_touchpoints") or []
+    if isinstance(touchpoints, dict):
+        touchpoints = touchpoints.get("ui_touchpoints") or touchpoints.get("items") or []
+    if isinstance(touchpoints, list):
+        artifacts["ui_touchpoints"] = sanitize_touchpoints(
+            touchpoints,
+            cases,
+            workflow_md=workflow_md,
+            feature_goal=str(feature_definition.get("goal") or ""),
+        )
+
+
 async def export_validated_package(
     session_id: str,
     user_id: str | None = None,
@@ -122,6 +154,7 @@ async def export_validated_package(
     ensure_bpmn_artifact(state)
     ensure_touchpoints_artifact(state)
     envelope = build_export_envelope(state)
+    _clean_export_artifacts(envelope, state)
     await persist_control_delta(
         session_id,
         {

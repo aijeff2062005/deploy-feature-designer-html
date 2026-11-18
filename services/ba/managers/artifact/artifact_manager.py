@@ -5,7 +5,7 @@ import unicodedata
 from enum import Enum
 from typing import Any, Dict, List, Tuple
 
-from agents.sub_graph.feature_definition.schemas import FeatureDefinitionData
+from agents.sub_graph.feature_definition.schemas import FeatureContinuityData, FeatureDefinitionData
 from managers.database.package_repository import BaPackageRepository
 
 
@@ -98,12 +98,12 @@ def _union_strings(current: list[str], delta: list[str] | None) -> list[str]:
 
 
 def _union_actors(current: list[str], delta: list[str] | None) -> list[str]:
-    """Append/union actors by ACT-ID; delta description wins on same id."""
-    if not delta:
+    """Normalize a full actor list; preserve current actors when delta is absent."""
+    if delta is None:
         return [canonicalize_actor(a) for a in current if canonicalize_actor(a)]
     by_id: dict[str, str] = {}
     order: list[str] = []
-    for item in list(current) + list(delta):
+    for item in delta:
         canonical = canonicalize_actor(item if isinstance(item, str) else str(item))
         if not canonical:
             continue
@@ -122,19 +122,42 @@ def merge_feature_definition_data(
 
     Rules:
     - Goal: overwrite only when delta.goal is non-empty.
-    - Actors / Scope In / Scope Out: append-union (never replace wholesale).
+    - Lists: a supplied list is the complete revised list; None preserves current data.
     - Actors are canonicalized to `ACT-ID: description`.
     """
     new_goal = delta.goal.strip() if delta.goal and delta.goal.strip() else current.goal
     new_actors = _union_actors(current.actors or [], delta.actors)
-    new_scope_in = _union_strings(current.scope_in or [], delta.scope_in)
-    new_scope_out = _union_strings(current.scope_out or [], delta.scope_out)
+    new_scope_in = (
+        _union_strings([], delta.scope_in)
+        if delta.scope_in is not None
+        else _union_strings([], current.scope_in)
+    )
+    continuity_values = (current.continuity.model_dump() if current.continuity else {})
+    if delta.continuity:
+        continuity_delta = delta.continuity.model_dump(exclude_unset=True)
+        continuity_values.update({key: value for key, value in continuity_delta.items() if value is not None})
+        if continuity_values.get("has_successor") is False:
+            for key in ("handoffs", "successor_feature_id", "successor_feature_title", "exit_state_id", "exit_state", "deferred_scope"):
+                continuity_values[key] = None
+        if continuity_values.get("has_predecessor") is False:
+            for key in ("incoming_handoffs", "predecessor_feature_id", "predecessor_feature_title", "predecessor_version", "predecessor_end_state_id", "entry_state"):
+                continuity_values[key] = None
+    merged_continuity = FeatureContinuityData.model_validate(continuity_values) if continuity_values else None
+    base_scope_out = (
+        _union_strings([], delta.scope_out)
+        if delta.scope_out is not None
+        else _union_strings([], current.scope_out)
+    )
 
     return FeatureDefinitionData(
         goal=new_goal,
         actors=new_actors,
         scope_in=new_scope_in,
-        scope_out=new_scope_out,
+        # Scope Out is an explicit Feature Definition list. Continuity's deferred
+        # scope is a separate handoff contract and must not create or duplicate
+        # Scope Out entries implicitly.
+        scope_out=base_scope_out,
+        continuity=merged_continuity,
     )
 
 

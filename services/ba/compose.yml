@@ -15,14 +15,18 @@ services:
       DESIGNER_INTERNAL_URL: http://designer-api:8282
       WIKI_MVP_ROOT: /opt/platform/packages/wiki
       WIKI_DATA_DIR: /data/wiki
+      BASIC_MEMORY_MCP_URL: http://basic-memory:8000/mcp
     volumes:
       - wiki-data:/data/wiki
       - platform-storage:/data/storage
+      - ../../scripts:/opt/platform/scripts:ro
       - ../../logs:/logs                 # platform/logs/ba-api/
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
+        condition: service_healthy
+      basic-memory:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
@@ -31,6 +35,9 @@ services:
       retries: 24
       start_period: 25s
     restart: unless-stopped
+    networks:
+      - default
+      - wiki-index
 
   ba-web:
     build:

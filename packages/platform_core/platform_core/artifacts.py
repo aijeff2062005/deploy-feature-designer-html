@@ -7,6 +7,8 @@ Only metadata lives here; bytes are in platform storage under ``storage_key``.
 * ``designer_output`` — a finished Designer run's .fig
   (``source_ref`` = run id, ``version`` = run revision), with
   ``derived_from`` = the BA package version it was designed from.
+* ``project_design_wiki`` — a versioned project-wide visual baseline published
+  from an approved Designer feature.
 
 A design is *stale* when a newer version of the BA package it derives from
 exists (computed on read, no background job).
@@ -40,7 +42,7 @@ CREATE TABLE IF NOT EXISTS core.artifacts (
 CREATE INDEX IF NOT EXISTS idx_artifacts_project ON core.artifacts(project_id, kind);
 """
 
-KINDS = ("ba_package", "bpmn", "ui_spec", "designer_output")
+KINDS = ("ba_package", "bpmn", "ui_spec", "designer_output", "project_design_wiki")
 
 
 _schema_ready = False

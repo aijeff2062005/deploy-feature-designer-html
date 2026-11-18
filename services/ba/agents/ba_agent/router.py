@@ -123,6 +123,26 @@ def route_ba_turn(ctx: Context) -> str:
 
 
 @node(name="ba_router")
-def ba_router_node(ctx: Context) -> str:
+async def ba_router_node(ctx: Context) -> str:
     """Route by ticket_type + active_section. Unimplemented paths go to stub/locked."""
-    return route_ba_turn(ctx)
+    user_input = route_ba_turn(ctx)
+    await _sync_explicit_oq_answers_before_section(ctx, user_input)
+    return user_input
+
+
+async def _sync_explicit_oq_answers_before_section(ctx: Context, user_input: str) -> None:
+    """Sync explicit OQ answers from any active section before its agent runs."""
+    if ctx.route != ROUTE_OPEN_QUESTIONS:
+        resolutions = resolutions_from_user_message(user_input)
+        if resolutions and apply_oq_resolutions(ctx.state, resolutions):
+            ctx.state["_oq_user_explicit_answer_ids"] = [
+                item["id"] for item in resolutions
+            ]
+            from agents.ba_agent.open_questions import sync_open_questions_sequentially
+
+            await ctx.run_node(
+                sync_open_questions_sequentially,
+                node_input="Synchronize explicitly answered Open Questions before continuing the active BA section.",
+                run_id=f"oq_sync_t{ctx.state.get('current_turn')}_before_section",
+            )
+            sync_sections_status_from_flags(ctx.state)

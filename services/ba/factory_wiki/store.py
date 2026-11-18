@@ -9,8 +9,11 @@ upload with Namespace=company in wiki.html (project_id is ignored for scope).
 
 from __future__ import annotations
 
+import logging
+import os
+import re
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from factory_wiki.paths import (
@@ -21,6 +24,7 @@ from factory_wiki.paths import (
 
 AGENT_VA = "validation-agent"
 AGENT_BA = "ba-agent"
+logger = logging.getLogger(__name__)
 
 # MVP namespaces — company is shared; project is scoped by feature.project_id.
 NAMESPACE_COMPANY = "company"
@@ -69,8 +73,8 @@ def _visible_approved_args(project_id: str) -> tuple[Any, ...]:
 class WikiStore:
     """Search/fetch port used by VA and the feature documents API.
 
-    Opens the Wiki Knowledge MVP SQLite (``wiki_page`` / ``wiki_revision`` /
-    ``wiki_source``) and applies MVP permission helpers so agents cannot
+    Opens the Wiki Knowledge MVP tables (``wiki_page`` / ``wiki_revision`` /
+    ``wiki_source``) in the shared PostgreSQL schema and applies permission helpers so agents cannot
     search drafts or other projects. Does not import ``WikiService`` (PDF
     ingest) — document I/O only.
 
@@ -97,7 +101,7 @@ class WikiStore:
         self.conn.execute("PRAGMA busy_timeout=5000")
 
     def reopen(self) -> None:
-        """Close and re-open SQLite so the next read is not a stale snapshot."""
+        """Close and re-open the PostgreSQL-backed Wiki connection."""
         try:
             self.conn.close()
         except Exception:
@@ -146,6 +150,7 @@ class WikiStore:
         self.reopen()
         if not self._agent_may_read(project_id, agent_name):
             return []
+
         rows = self.conn.execute(
             f"""
             SELECT page_id, title, body, version, bucket_id, status, updated_at,
@@ -175,6 +180,65 @@ class WikiStore:
         if not self._agent_may_read(project_id, agent_name):
             return []
 
+        # Basic Memory ranks candidates; PostgreSQL remains authoritative for
+        # approval state and the agent's project boundary.
+        bm_hits: list[dict[str, Any]] = []
+        bm_url = os.getenv("BASIC_MEMORY_MCP_URL", "").strip()
+        if bm_url and query and not bucket_id:
+            try:
+                from wiki.basic_memory import BasicMemoryClient
+                from wiki.project_files import ProjectFileWiki
+
+                files = ProjectFileWiki()
+                for hit in BasicMemoryClient(bm_url).search(
+                    project_id, files.markdown_root(project_id), query, max(limit * 3, 10),
+                ):
+                    path = str(hit.get("file_path") or hit.get("path") or hit.get("identifier") or "")
+                    parts = PurePosixPath(path.replace("\\", "/")).parts
+                    if "pages" in parts and parts.index("pages") + 1 < len(parts):
+                        page_id = parts[parts.index("pages") + 1]
+                    else:
+                        page_id = PurePosixPath(path).stem
+                    page_id = str(hit.get("page_id") or page_id)
+                    if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", page_id):
+                        continue
+                    row = self.conn.execute(
+                        f"SELECT page_id, title, body, version, bucket_id, status, updated_at, namespace, project_id "
+                        f"FROM wiki_page WHERE {_VISIBLE_APPROVED_SQL} AND page_id = ?",
+                        (*_visible_approved_args(project_id), page_id),
+                    ).fetchone()
+                    if row:
+                        result = self._hit_from_row(row)
+                        result["score"] = hit.get("score")
+                        bm_hits.append(result)
+                    elif path.replace("\\", "/").casefold().startswith("features/"):
+                        metadata = files.read_metadata(project_id, path.replace("\\", "/"))
+                        if (metadata.get("project_id") != project_id
+                                or metadata.get("status") != "approved"
+                                or metadata.get("type") != "ba_feature"):
+                            continue
+                        artifact_id = str(metadata.get("source_artifact_id") or "")
+                        artifact = self.conn.execute(
+                            "SELECT id, title, version, created_at FROM core.artifacts "
+                            "WHERE id=? AND project_id=? AND kind='ba_package'",
+                            (artifact_id, project_id),
+                        ).fetchone()
+                        if artifact:
+                            note = files.read(project_id, path.replace("\\", "/")).decode("utf-8")
+                            note_parts = note.split("---", 2)
+                            note_body = note_parts[2].strip() if len(note_parts) == 3 else note
+                            bm_hits.append({
+                                "page_id": artifact["id"], "artifact_id": artifact["id"],
+                                "feature_id": metadata.get("feature_id"),
+                                "namespace": NAMESPACE_PROJECT, "project_id": project_id,
+                                "bucket_id": "ba_feature", "title": artifact["title"],
+                                "snippet": note_body[:240],
+                                "version": str(artifact["version"]), "status": "approved",
+                                "updated_at": str(artifact["created_at"]), "score": hit.get("score"),
+                            })
+            except Exception:
+                logger.exception("Basic Memory search failed; using PostgreSQL Wiki search")
+
         sql = [
             "SELECT page_id, title, body, version, bucket_id, status, updated_at,",
             "namespace, project_id",
@@ -194,7 +258,14 @@ class WikiStore:
         sql.append("ORDER BY updated_at DESC, page_id ASC LIMIT ?")
         args.append(max(1, min(limit, 50)))
         rows = self.conn.execute(" ".join(sql), args).fetchall()
-        return [self._hit_from_row(row) for row in rows]
+        results = bm_hits + [self._hit_from_row(row) for row in rows]
+        ordered: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for hit in results:
+            if hit["page_id"] not in seen:
+                seen.add(hit["page_id"])
+                ordered.append(hit)
+        return ordered[:max(1, min(limit, 50))]
 
     def fetch(
         self,
@@ -214,7 +285,33 @@ class WikiStore:
             "SELECT * FROM wiki_page WHERE page_id = ?", (page_id,)
         ).fetchone()
         if not row:
-            return None
+            # Feature notes map back to an approved project Asset. Recheck the
+            # artifact's project and type in PostgreSQL before reading its JSON.
+            artifact = self.conn.execute(
+                "SELECT id, project_id, title, version, storage_key, created_at FROM core.artifacts "
+                "WHERE id=? AND project_id=? AND kind='ba_package'",
+                (page_id, project_id),
+            ).fetchone()
+            if not artifact or not artifact["storage_key"]:
+                return None
+            try:
+                self._require_project_scope(
+                    actor, namespace=NAMESPACE_PROJECT, project_id=artifact["project_id"],
+                )
+            except self._WikiError:
+                return None
+            if artifact["project_id"] != project_id:
+                return None
+            from platform_core.storage import get_storage
+
+            package = get_storage().get(artifact["storage_key"]).decode("utf-8")
+            return {
+                "page_id": artifact["id"], "artifact_id": artifact["id"],
+                "namespace": NAMESPACE_PROJECT, "project_id": project_id,
+                "bucket_id": "ba_feature", "title": artifact["title"],
+                "status": "approved", "version": str(artifact["version"]),
+                "body": package, "updated_at": str(artifact["created_at"]),
+            }
         page = self._row_to_dict(row)
         try:
             self._require_project_scope(
@@ -237,6 +334,22 @@ class WikiStore:
         else:
             return None
 
+        body = page["body"]
+        if ns == NAMESPACE_PROJECT:
+            try:
+                from wiki.project_files import ProjectFileWiki
+
+                safe_id = re.sub(r"[^A-Za-z0-9_-]", "-", str(page_id)).strip("-")[:100] or "page"
+                content = ProjectFileWiki().read(project_id, f"pages/{safe_id}.md").decode("utf-8")
+                parts = content.split("---", 2)
+                if len(parts) == 3:
+                    body = parts[2].strip()
+                    heading = f"# {page['title']}"
+                    if body.startswith(heading):
+                        body = body[len(heading):].lstrip()
+            except Exception:
+                pass  # Pre-migration pages remain available from the PostgreSQL record.
+
         return {
             "page_id": page["page_id"],
             "namespace": page["namespace"],
@@ -245,7 +358,7 @@ class WikiStore:
             "title": page["title"],
             "status": page["status"],
             "version": page["version"],
-            "body": page["body"],
+            "body": body,
             "updated_at": page["updated_at"],
         }
 

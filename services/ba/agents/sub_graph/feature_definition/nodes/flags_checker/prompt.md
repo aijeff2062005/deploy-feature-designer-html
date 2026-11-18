@@ -11,13 +11,13 @@ Bạn nhận được 2 khối dữ liệu:
 1. **ARTIFACT DATA**: Dữ liệu Feature Definition hiện tại
 2. **PENDING SEMANTIC FLAGS**: Danh sách các flag cần bạn đánh giá ngữ nghĩa
 
-## QUY TẮC BẮT BUỘC
+## OUTPUT BẮT BUỘC
 
-Với **MỖI** flag trong PENDING SEMANTIC FLAGS, bạn **PHẢI** gọi tool `update_feature_flag_status`:
-- Nếu dữ liệu **ĐẠT** tiêu chuẩn → `status="PASS"`
-- Nếu dữ liệu **KHÔNG ĐẠT** → `status="NOT_YET_REASONABLE"` kèm `detail` giải thích cụ thể
+Trả về một JSON object theo schema `SemanticFlagsEvaluation`, không kèm Markdown hay giải thích bên ngoài JSON:
 
-**KHÔNG ĐƯỢC bỏ qua bất kỳ flag nào.** Bạn PHẢI gọi tool cho TẤT CẢ các flag pending.
+`{"evaluations":[{"flag_id":"<id lấy từ PENDING SEMANTIC FLAGS>","status":"PASS hoặc NOT_YET_REASONABLE","detail":null}]}`
+
+Đánh giá **mọi** flag được cung cấp. Dùng đúng `flag_id` từ dữ liệu đầu vào. Nếu đạt tiêu chuẩn, trả `PASS` và `detail: null`. Nếu chưa đạt hoặc còn mâu thuẫn, trả `NOT_YET_REASONABLE` và nêu rõ phần dữ liệu cần sửa trong `detail`. Không gọi tool.
 
 ---
 
@@ -36,8 +36,9 @@ Với **MỖI** flag trong PENDING SEMANTIC FLAGS, bạn **PHẢI** gọi tool `
 ## FD-F5: Mâu thuẫn phạm vi (Scope Conflict)
 
 **PASS** khi:
-- Không phát hiện tính năng nào vừa nằm trong `scope_in` vừa nằm trong `scope_out`
+- Không có cùng một chức năng thực sự vừa được đưa vào `scope_in` vừa bị loại khỏi `scope_out`
+- Việc nhắc tới một chức năng ngoài phạm vi chỉ để mô tả đích điều hướng, trạng thái bàn giao hoặc quan hệ với feature khác không tự nó tạo thành xung đột, nếu phần triển khai chi tiết vẫn được loại khỏi phạm vi hiện tại
 
 **NOT_YET_REASONABLE** khi:
-- Phát hiện tính năng trùng lặp giữa `scope_in` và `scope_out`
-- Nêu rõ tính năng nào bị trùng lặp trong `detail`
+- Cùng một chức năng hoặc cùng một phần triển khai được yêu cầu thực hiện trong `scope_in` nhưng bị loại trừ trong `scope_out`
+- Nêu rõ hai mô tả mâu thuẫn trong `detail`; không coi việc tham chiếu/điều hướng/bàn giao là bao gồm triển khai

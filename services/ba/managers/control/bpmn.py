@@ -54,16 +54,17 @@ def _slug(text: str, fallback: str) -> str:
     return cleaned[:48]
 
 
-def _heading_section(content: str, heading: str) -> str:
+def _heading_section(content: str, heading: str) -> str | None:
     lines = content.splitlines()
     start = None
-    pattern = re.compile(rf"^#{{1,3}}\s*{re.escape(heading)}\b", re.IGNORECASE)
+    # Accept ordered headings while keeping each parsed section isolated.
+    pattern = re.compile(rf"^#{{1,3}}\s*(?:\d+[.)]?\s*)?{re.escape(heading)}\b", re.IGNORECASE)
     for i, raw in enumerate(lines):
         if pattern.match(raw.strip()):
             start = i + 1
             break
     if start is None:
-        return ""
+        return None
     end = len(lines)
     for j in range(start, len(lines)):
         if re.match(r"^#{1,3}\s+\S", lines[j].strip()) and not pattern.match(
@@ -90,24 +91,59 @@ def _is_separator_row(cells: list[str]) -> bool:
     return all(re.fullmatch(r":?-+:?", c or "") or not c for c in cells)
 
 
+def _table_cells(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def _is_table_header(lines: list[str], index: int) -> bool:
+    if index + 1 >= len(lines) or not lines[index].strip().startswith("|"):
+        return False
+    next_line = lines[index + 1].strip()
+    return next_line.startswith("|") and _is_separator_row(_table_cells(next_line))
+
+
+def _parse_end_state_list_item(line: str) -> tuple[str, str] | None:
+    """Return the explicit ID and description from a Markdown list entry."""
+    item = re.sub(r"^(?:[-*+•]\s+|\d+[.)]\s+)", "", line.strip())
+    identifier = r"[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*"
+    patterns = (
+        rf"^[*_`]*(?P<id>{identifier})[*_`]*\s*[:：]\s*[*_`]*(?P<label>.+?)\s*[*_`]*$",
+        rf"^[*_`]*(?P<id>{identifier})[*_`]*\s+[—–-]\s+[*_`]*(?P<label>.+?)\s*[*_`]*$",
+    )
+    for pattern in patterns:
+        match = re.match(pattern, item)
+        if match:
+            label = match.group("label").strip()
+            if label:
+                return match.group("id"), label
+    return None
+
+
+def _clean_end_state_id(value: str) -> str:
+    """Remove Markdown emphasis/code wrappers around a state identifier."""
+    return re.sub(r"^[*_`]+|[*_`]+$", "", str(value or "").strip()).strip()
+
+
 def parse_workflow_steps(workflow_md: str) -> dict[str, Any]:
     """Extract main-flow steps, exceptions, and end states from markdown.
 
     Table columns: ``Step | Actor | Action | BR | Gateway`` (Gateway optional).
     """
     content = str(workflow_md or "")
-    main = _heading_section(content, "Main Flow") or content
+    main_section = _heading_section(content, "Main Flow")
+    has_section_headings = any(re.match(r"^#{1,3}\s+\S", line.strip()) for line in content.splitlines())
+    main = main_section if main_section is not None else ("" if has_section_headings else content)
     steps: list[dict[str, str]] = []
-    for raw in main.splitlines():
+    main_lines = main.splitlines()
+    for line_index, raw in enumerate(main_lines):
         line = raw.strip()
         if not line:
             continue
         if line.startswith("|"):
-            cells = [c.strip() for c in line.strip("|").split("|")]
+            cells = _table_cells(line)
             if not cells or _is_separator_row(cells):
                 continue
-            header = " ".join(cells).lower()
-            if header.startswith("step") or set(header.replace(" ", "")) <= {"-"}:
+            if _is_table_header(main_lines, line_index):
                 continue
             step_no = cells[0]
             actor = cells[1] if len(cells) > 1 else ""
@@ -152,17 +188,17 @@ def parse_workflow_steps(workflow_md: str) -> dict[str, Any]:
             )
 
     exceptions: list[dict[str, str]] = []
-    exc_section = _heading_section(content, "Exception Flows")
-    for raw in exc_section.splitlines():
+    exc_section = _heading_section(content, "Exception Flows") or ""
+    exception_lines = exc_section.splitlines()
+    for line_index, raw in enumerate(exception_lines):
         line = raw.strip()
-        if not line or line.startswith("|") and "condition" in line.lower():
+        if not line:
             continue
         if line.startswith("|"):
-            cells = [c.strip() for c in line.strip("|").split("|")]
+            cells = _table_cells(line)
             if not cells or _is_separator_row(cells):
                 continue
-            header = " ".join(cells).lower()
-            if "id" in header and "condition" in header:
+            if _is_table_header(exception_lines, line_index):
                 continue
             exceptions.append(
                 {
@@ -183,17 +219,43 @@ def parse_workflow_steps(workflow_md: str) -> dict[str, Any]:
             )
 
     end_states: list[str] = []
-    end_section = _heading_section(content, "End States")
-    for raw in end_section.splitlines():
+    end_state_ids: list[str] = []
+    end_state_headers: list[str] = []
+    end_section = _heading_section(content, "End States") or ""
+    end_lines = end_section.splitlines()
+    for line_index, raw in enumerate(end_lines):
         line = raw.strip()
         if not line:
             continue
-        line = re.sub(r"^[-*•]\s+", "", line)
         if line.startswith("|"):
+            cells = _table_cells(line)
+            if not cells or _is_separator_row(cells):
+                continue
+            if _is_table_header(end_lines, line_index):
+                end_state_headers = cells
+                continue
+            if end_state_headers:
+                if cells:
+                    end_state_ids.append(_clean_end_state_id(cells[0]))
+                    label = cells[1] if len(cells) > 1 else cells[0]
+                    if label:
+                        end_states.append(label)
             continue
-        end_states.append(line)
+        parsed_item = _parse_end_state_list_item(line)
+        if parsed_item:
+            state_id, label = parsed_item
+            end_state_ids.append(state_id)
+            end_states.append(label)
+        else:
+            end_states.append(line)
 
-    return {"steps": steps, "exceptions": exceptions, "end_states": end_states}
+    return {
+        "steps": steps,
+        "exceptions": exceptions,
+        "end_states": end_states,
+        "end_state_ids": end_state_ids,
+        "end_state_headers": end_state_headers,
+    }
 
 
 def _split_actor_action(text: str) -> tuple[str, str]:
@@ -730,7 +792,7 @@ def _build_bpmndi(
 
 
 def resolve_active_story_id(state: dict[str, Any]) -> str:
-    """Prefer ``active_user_story_id``; else US-01 / first use_cases id."""
+    """Resolve the active story from session state or available use cases."""
     artifacts = state.get("artifacts") or {}
     cases = artifacts.get("use_cases") or []
     cases_list = cases if isinstance(cases, list) else []
@@ -753,7 +815,7 @@ def resolve_active_story_id(state: dict[str, Any]) -> str:
             cid = str(case["id"]).strip()
             if cid:
                 return cid
-    return "US-01"
+    return ""
 
 
 def _allowed_actors_from_state(state: dict[str, Any]) -> list[str]:

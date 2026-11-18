@@ -122,6 +122,14 @@ class StyleCandidate(BaseModel):
     surface_language: str = ""
     shape_language: str = ""
     hero_placement: str = ""
+    background_treatment: str = Field(
+        default="",
+        max_length=800,
+        description=(
+            "Required art-directed screen background: describe the palette-derived CSS/SVG motif, "
+            "its screen region and scale, and how it stays behind readable content."
+        ),
+    )
 
 
 class DesignBrief(BaseModel):

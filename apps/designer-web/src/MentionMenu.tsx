@@ -7,6 +7,7 @@ const KIND_ICON: Record<ProjectFileKind, typeof FileJson> = {
     ui_spec: FileJson,
     designer_output: Layers,
     wiki_source: BookOpen,
+    project_design_wiki: BookOpen,
 };
 
 /** "@" picker shown above the composer, like file mentions in IDE agents. */

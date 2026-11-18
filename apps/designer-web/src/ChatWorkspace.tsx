@@ -61,21 +61,129 @@ interface StylePreviewOption {
     name: string;
     tagline: string;
     recommended: boolean;
-    image: string;
+    image?: string;
     asset_credit?: string;
     asset_source_url?: string;
     review_notes?: string[];
+    html?: string;
+    compiled_css?: string;
+    preview_width?: number;
+    preview_height?: number;
+}
+
+function previewDocument(option: StylePreviewOption): string | undefined {
+    if (!option.html || !option.compiled_css) return undefined;
+    const policy = "default-src 'none'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'; object-src 'none'";
+    const css = option.compiled_css.replace(/<\/style/gi, "<\\/style");
+    return `<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${policy}"><style>${css}</style></head><body>${option.html}</body></html>`;
+}
+
+function LiveStylePreview({ option, className = "", zoom = 1 }: { option: StylePreviewOption; className?: string; zoom?: number }) {
+    const srcDoc = previewDocument(option);
+    const stageRef = useRef<HTMLDivElement>(null);
+    const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
+    useEffect(() => {
+        const node = stageRef.current;
+        if (!node) return;
+        const observer = new ResizeObserver(([entry]) => setStageSize({ width: entry.contentRect.width, height: entry.contentRect.height }));
+        observer.observe(node);
+        return () => observer.disconnect();
+    }, []);
+    const width = Math.max(1, Number(option.preview_width) || 390);
+    const height = Math.max(1, Number(option.preview_height) || 844);
+    const fittedScale = stageSize.width && stageSize.height ? Math.min(stageSize.width / width, stageSize.height / height) : 1;
+    const scale = fittedScale * zoom;
+    if (srcDoc) {
+        return <div ref={stageRef} className={`live-style-preview ${className}`} style={{ aspectRatio: `${width} / ${height}` }}>
+            <div className="live-style-preview-sized" style={{ width: width * scale, height: height * scale }}>
+                <iframe title={`Bản xem trước ${option.name}`} srcDoc={srcDoc} sandbox="allow-scripts" style={{ width, height, transform: `scale(${scale})` }} />
+            </div>
+        </div>;
+    }
+    return <div ref={stageRef} className={`live-style-preview ${className}`} style={{ aspectRatio: `${width} / ${height}` }}>{option.image && <img src={option.image} alt={`Bản xem trước ${option.name}`} />}</div>;
+}
+
+function StylePreviewDialog({
+    options, activeIndex, onActiveIndex, onClose, onSelect, selectedStyle, mode = "single",
+}: {
+    options: StylePreviewOption[];
+    activeIndex: number;
+    onActiveIndex: (index: number) => void;
+    onClose: () => void;
+    onSelect: (option: StylePreviewOption) => void;
+    selectedStyle?: string;
+    mode?: "single" | "gallery";
+}) {
+    const option = options[activeIndex];
+    const [zoom, setZoom] = useState(1);
+    useEffect(() => setZoom(1), [activeIndex]);
+    useEffect(() => {
+        const onKeyDown = (event: KeyboardEvent) => {
+            if (event.key === "Escape") onClose();
+            if (event.key === "ArrowLeft") onActiveIndex((activeIndex + options.length - 1) % options.length);
+            if (event.key === "ArrowRight") onActiveIndex((activeIndex + 1) % options.length);
+        };
+        window.addEventListener("keydown", onKeyDown);
+        return () => window.removeEventListener("keydown", onKeyDown);
+    }, [activeIndex, onActiveIndex, onClose, options.length]);
+    if (!option) return null;
+    return (
+        <div className="style-preview-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+            <section className={`style-preview-dialog${mode === "gallery" ? " is-gallery" : ""}`} role="dialog" aria-modal="true" aria-label={mode === "gallery" ? "Xem trước ba hướng thiết kế" : `Xem trước ${option.name}`}>
+                <header>
+                    <div><strong>{option.name}</strong><span>{activeIndex + 1} / {options.length}</span></div>
+                    <button type="button" aria-label="Đóng xem trước" onClick={onClose}><X size={19} /></button>
+                </header>
+                {mode === "gallery" ? <div className="style-preview-dialog-gallery">
+                    {options.map((item) => <article className={`style-preview-dialog-option${selectedStyle === item.key ? " is-selected" : ""}`} key={item.key}>
+                        <strong>{item.name}</strong>
+                        <p>{item.tagline}</p>
+                        <LiveStylePreview option={item} className="style-preview-dialog-option-frame" />
+                        <button type="button" className="style-preview-dialog-select" onClick={() => onSelect(item)}>
+                            {selectedStyle === item.key ? <><Check size={15} /> Đã chọn</> : <><Check size={15} /> Chọn hướng này</>}
+                        </button>
+                    </article>)}
+                </div> : <div className="style-preview-dialog-stage">
+                    {options.length > 1 && <button type="button" className="style-preview-dialog-arrow" aria-label="Hướng trước" onClick={() => onActiveIndex((activeIndex + options.length - 1) % options.length)}><ChevronLeft /></button>}
+                    <div className="style-preview-dialog-canvas">
+                        <div className="style-preview-zoom-controls">
+                            <button type="button" aria-label="Thu nhỏ" onClick={() => setZoom((value) => Math.max(0.5, value - 0.15))}><ZoomOut size={16} /></button>
+                            <span>{Math.round(zoom * 100)}%</span>
+                            <button type="button" aria-label="Phóng to" onClick={() => setZoom((value) => Math.min(2.5, value + 0.15))}><ZoomIn size={16} /></button>
+                        </div>
+                        <LiveStylePreview option={option} className="style-preview-dialog-frame" zoom={zoom} />
+                    </div>
+                    {options.length > 1 && <button type="button" className="style-preview-dialog-arrow" aria-label="Hướng tiếp theo" onClick={() => onActiveIndex((activeIndex + 1) % options.length)}><ChevronRight /></button>}
+                </div>}
+                {mode === "single" && <nav className="style-preview-dialog-tabs" aria-label="Các hướng thiết kế">
+                    {options.map((item, index) => <button key={item.key} type="button" className={`${index === activeIndex ? "active" : ""}${selectedStyle === item.key ? " is-selected" : ""}`} onClick={() => onActiveIndex(index)}>
+                        <span>{item.name}</span>{selectedStyle === item.key && <Check size={14} />}
+                    </button>)}
+                </nav>}
+                <footer>
+                    <span>{mode === "gallery" ? "Chọn một hướng để áp dụng cho các màn hình của feature" : "Preview HTML trực tiếp · Phóng to/thu nhỏ để xem chi tiết"}</span>
+                    {mode === "single" && <button type="button" className="style-preview-dialog-select" onClick={() => onSelect(option)}>
+                        {selectedStyle === option.key ? <><Check size={15} /> Đã chọn hướng này</> : <><Check size={15} /> Dùng hướng này</>}
+                    </button>}
+                </footer>
+            </section>
+        </div>
+    );
 }
 
 function StylePreviewGallery({
     event,
     busy,
     onSelect,
+    selectedStyle,
 }: {
     event: WorkflowEvent;
     busy: boolean;
     onSelect: (option: StylePreviewOption) => void;
+    selectedStyle?: string;
 }) {
+    const [dialogIndex, setDialogIndex] = useState<number | null>(null);
+    const [dialogMode, setDialogMode] = useState<"single" | "gallery">("single");
     const options = Array.isArray(event.payload.options)
         ? (event.payload.options as StylePreviewOption[])
         : [];
@@ -91,6 +199,7 @@ function StylePreviewGallery({
                     <strong>Chọn hướng thiết kế</strong>
                     <p>Ba bản xem trước được tạo theo nội dung và mục đích của dự án.</p>
                 </div>
+                <button type="button" className="style-preview-open-gallery" onClick={() => { setDialogMode("gallery"); setDialogIndex(0); }}><Eye size={15} /> Xem popup 3 hướng</button>
             </div>
             <div className="style-preview-context">
                 <span className="style-preview-context-dot" />
@@ -116,22 +225,19 @@ function StylePreviewGallery({
                         )}
                         <button
                             className={`style-preview-image-button${platform === "mobile" ? " is-mobile" : " is-desktop"}`}
-                            onClick={() => onSelect(option)}
+                            onClick={() => { setDialogMode("single"); setDialogIndex(index); }}
                             type="button"
-                            disabled={busy}
-                            aria-label={`Xem và chọn phong cách ${option.name}`}
+                            aria-label={`Phóng to bản xem trước ${option.name}`}
                         >
-                            <span className="style-preview-device">
-                                <img src={option.image} alt={`${screenName}, thiết kế theo phong cách ${option.name}`} />
-                            </span>
+                            <LiveStylePreview option={option} className="style-preview-device" />
                         </button>
                         <button
-                            className="style-preview-select"
+                            className={`style-preview-select${selectedStyle === option.key ? " is-selected" : ""}`}
                             onClick={() => onSelect(option)}
                             type="button"
                             disabled={busy}
                         >
-                            Chọn hướng này
+                            {selectedStyle === option.key ? <><Check size={14} /> Đã chọn</> : "Chọn hướng này"}
                         </button>
                         {option.review_notes?.length ? (
                             <div className="style-preview-review-notes" role="note">
@@ -143,6 +249,65 @@ function StylePreviewGallery({
                 ))}
             </div>
             <p className="style-preview-note">Cùng một màn hình và chức năng đã chốt; mỗi lựa chọn thể hiện một ngôn ngữ thị giác riêng.</p>
+            {dialogIndex !== null && <StylePreviewDialog options={options} activeIndex={dialogIndex} onActiveIndex={setDialogIndex} onClose={() => setDialogIndex(null)} onSelect={(option) => { onSelect(option); }} selectedStyle={selectedStyle} mode={dialogMode} />}
+        </section>
+    );
+}
+
+function InheritedStylePreview({
+    event,
+    busy,
+    onUse,
+    onExplore,
+    selectedStyle,
+}: {
+    event: WorkflowEvent;
+    busy: boolean;
+    onUse: (option: StylePreviewOption) => Promise<void> | void;
+    onExplore: () => Promise<void>;
+    selectedStyle?: string;
+}) {
+    const [actionBusy, setActionBusy] = useState(false);
+    const [dialogOpen, setDialogOpen] = useState(false);
+    const option = Array.isArray(event.payload.options)
+        ? (event.payload.options[0] as StylePreviewOption | undefined)
+        : undefined;
+    const screenName = typeof event.payload.screen_name === "string" ? event.payload.screen_name : "";
+    const source = typeof event.payload.source_feature_title === "string" ? event.payload.source_feature_title : "";
+    const platform = typeof event.payload.platform === "string" ? event.payload.platform : "";
+    if (!option) return null;
+
+    return (
+        <section className="inherited-style-preview" aria-label="Xem trước chuẩn thiết kế kế thừa">
+            <div className="inherited-style-preview-image">
+                <span className="inherited-style-preview-badge"><Sparkles size={13} /> Kế thừa Wiki</span>
+                <button type="button" className="inherited-style-open-preview" aria-label="Phóng to màn hình xem trước" onClick={() => setDialogOpen(true)}>
+                    <LiveStylePreview option={option} />
+                    <span><Maximize2 size={14} /> Xem lớn</span>
+                </button>
+            </div>
+            <div className="inherited-style-preview-info">
+                <div>
+                    <strong>{option.name}</strong>
+                    {[screenName, source && `từ ${source}`, platform].filter(Boolean).join(" · ")}
+                    {option.tagline && <p>{option.tagline}</p>}
+                </div>
+                <div className="inherited-style-preview-actions">
+                    <button type="button" className={`inherited-style-use${selectedStyle === option.key ? " is-selected" : ""}`} disabled={busy || actionBusy} onClick={async () => {
+                        setActionBusy(true);
+                        try { await onUse(option); } finally { setActionBusy(false); }
+                    }}>
+                        <Check size={15} /> {selectedStyle === option.key ? "Đã chọn" : "Dùng chuẩn này"}
+                    </button>
+                    <button type="button" className="inherited-style-explore" disabled={busy || actionBusy} onClick={async () => {
+                        setActionBusy(true);
+                        try { await onExplore(); } finally { setActionBusy(false); }
+                    }}>
+                        <LayoutGrid size={14} /> Xem 3 hướng khác
+                    </button>
+                </div>
+            </div>
+            {dialogOpen && <StylePreviewDialog options={[option]} activeIndex={0} onActiveIndex={() => undefined} onClose={() => setDialogOpen(false)} onSelect={(selected) => { void onUse(selected); }} selectedStyle={selectedStyle} />}
         </section>
     );
 }
@@ -151,6 +316,7 @@ interface Props {
     run?: Run;
     runs: Run[];
     events: WorkflowEvent[];
+    historyEvents: WorkflowEvent[];
     busy: boolean;
     sessionId?: string;
     onOpenCanvas?: () => void;
@@ -161,7 +327,8 @@ interface Props {
         styleName?: string;
         libraryIds: string[];
         assets?: ExactAsset[];
-    }) => void;
+    }) => void | Promise<void>;
+    onExploreProjectStyles?: () => Promise<void>;
     onReview?: (
         decision: "approved" | "changes_requested",
         feedback?: string,
@@ -225,7 +392,7 @@ function getStageBadge(stage?: string) {
     }
 }
 
-const HIDDEN_CONVERSATION_EVENTS = new Set(["run.created", "stage.changed", "llm.usage"]);
+const HIDDEN_CONVERSATION_EVENTS = new Set(["run.created", "stage.changed", "llm.usage", "project.wiki.updated"]);
 const ATTACHMENT_CONTEXT_MARKER = "<!-- DESIGNER_ATTACHMENT_CONTEXT -->";
 const DEFAULT_ATTACHMENT_REQUEST =
     "Analyze the attached requirements and determine the complete, consistent set of screens and states to design.";
@@ -400,10 +567,12 @@ export function ChatWorkspace({
     run,
     runs,
     events,
+    historyEvents,
     busy,
     sessionId,
     onOpenCanvas,
     onSubmit,
+    onExploreProjectStyles,
     onReview,
     onToggleSidePanel,
     onRetry,
@@ -420,6 +589,11 @@ export function ChatWorkspace({
     const [reviewFeedback, setReviewFeedback] = useState("");
     const [selection, setSelection] = useState<CanvasSelection>();
     const [submittingReview, setSubmittingReview] = useState(false);
+    const [wikiApprovalOpen, setWikiApprovalOpen] = useState(false);
+    const [wikiPreviewIndex, setWikiPreviewIndex] = useState(0);
+    const [wikiVersion, setWikiVersion] = useState(1);
+    const [wikiPreviewFiles, setWikiPreviewFiles] = useState<{ path: string; content: string; screen_name?: string; platform?: string }[]>([]);
+    const [wikiPreviewError, setWikiPreviewError] = useState("");
     const [activityLogOpen, setActivityLogOpen] = useState(false);
     const [hulyDialogOpen, setHulyDialogOpen] = useState(false);
     const [hulyProjects, setHulyProjects] = useState<HulyProject[]>([]);
@@ -458,6 +632,54 @@ export function ChatWorkspace({
         run.specification.screens.length > 0,
     );
     const finalBlocked = false;
+    const designWikiFiles = wikiPreviewFiles.map((file) => ({
+        ...file,
+        summary: file.path.endsWith(".json")
+            ? "JSON lưu trong Project Wiki"
+            : file.path.endsWith(".md")
+              ? "Markdown lưu trong Project Wiki"
+              : `HTML template${file.screen_name ? ` · ${file.screen_name}` : ""}${file.platform ? ` · ${file.platform}` : ""}`,
+    }));
+
+    const approveCurrentReview = async () => {
+        if (submittingReview || !onReview || finalBlocked) return;
+        if (run?.stage === "review_final") {
+            setWikiPreviewError("");
+            try {
+                const preview = await api.projectWikiPreview(run.id);
+                setWikiVersion(preview.version);
+                setWikiPreviewFiles(preview.files);
+                setWikiPreviewIndex(0);
+            } catch (error) {
+                setWikiPreviewFiles([]);
+                setWikiPreviewError((error as Error).message || "Không tạo được bản xem trước Project Wiki.");
+            }
+            setWikiApprovalOpen(true);
+            return;
+        }
+        setSubmittingReview(true);
+        try {
+            await onReview("approved", reviewFeedback);
+            setReviewFeedback("");
+        } finally {
+            setSubmittingReview(false);
+        }
+    };
+
+    const confirmDesignWikiApproval = async () => {
+        if (!onReview || submittingReview) return;
+        setSubmittingReview(true);
+        try {
+            await onReview("approved", reviewFeedback);
+            setReviewFeedback("");
+            setWikiApprovalOpen(false);
+        } catch (error) {
+            setWikiPreviewError((error as Error).message || "Không lưu được Project Wiki. Hãy mở lại preview trước khi xác nhận.");
+            setWikiPreviewFiles([]);
+        } finally {
+            setSubmittingReview(false);
+        }
+    };
 
     const openHulyDialog = async () => {
         if (!run || !sessionId) return;
@@ -562,14 +784,19 @@ export function ChatWorkspace({
         .filter((item) => item.id !== run?.id)
         .slice()
         .reverse();
+    const selectedStyleForRun = (sourceRunId: string) => {
+        const sourceIndex = runs.findIndex((item) => item.id === sourceRunId);
+        if (sourceIndex < 0) return undefined;
+        return sourceIndex > 0 ? runs[sourceIndex - 1]?.style_name ?? undefined : undefined;
+    };
     const visibleEvents =
         run?.intent === "chat" || run?.intent === "gather"
-            ? events.filter((event) => event.type === "assistant.message" || event.type === "style.previews")
+            ? events.filter((event) => event.type === "assistant.message" || event.type === "style.previews" || event.type === "style.inherited.preview")
             : events.filter(
                   (event) => !HIDDEN_CONVERSATION_EVENTS.has(event.type),
               );
     const conversationEvents = visibleEvents.filter(
-        (event) => event.type === "assistant.message" || event.type === "style.previews",
+        (event) => event.type === "assistant.message" || event.type === "style.previews" || event.type === "style.inherited.preview",
     );
     const activityEvents = visibleEvents.filter(
         (event) => event.type !== "assistant.message",
@@ -774,6 +1001,42 @@ export function ChatWorkspace({
                                 </div>
                             </article>
                         )}
+                        {historyEvents.filter((event) => event.run_id === item.id).map((event) => (
+                            <article className="message assistant-message style-preview-message" key={event.id}>
+                                <AssistantAvatar />
+                                <div className="assistant-body">
+                                    <div className="assistant-header"><small>Designer</small></div>
+                                    {event.type === "style.inherited.preview" ? (
+                                        <InheritedStylePreview
+                                            event={event}
+                                            busy={isAgentWorking}
+                                            selectedStyle={selectedStyleForRun(item.id)}
+                                            onUse={(option) => onSubmit({
+                                                prompt: `Mình chọn phong cách "${option.name}" đã kế thừa từ Project Wiki. Hãy tiếp tục lập UI spec cho feature hiện tại theo BA package.`,
+                                                screenName: item.screen_name || "",
+                                                platform: item.platform,
+                                                styleName: option.key,
+                                                libraryIds: [],
+                                            })}
+                                            onExplore={async () => { await onExploreProjectStyles?.(); }}
+                                        />
+                                    ) : (
+                                        <StylePreviewGallery
+                                            event={event}
+                                            busy={isAgentWorking}
+                                            selectedStyle={selectedStyleForRun(item.id)}
+                                            onSelect={(option) => onSubmit({
+                                                prompt: `Mình chọn phong cách "${option.name}" trong preview. Áp dụng hướng này cho các screen đã chốt và tiếp tục tạo UI spec.`,
+                                                screenName: item.screen_name || "",
+                                                platform: item.platform,
+                                                styleName: option.key,
+                                                libraryIds: [],
+                                            })}
+                                        />
+                                    )}
+                                </div>
+                            </article>
+                        ))}
                     </div>
                 ))}
 
@@ -792,6 +1055,33 @@ export function ChatWorkspace({
                 )}
 
                 {conversationEvents.map((event) =>
+                    event.type === "style.inherited.preview" ? (
+                        <article className="message assistant-message style-preview-message" key={event.id}>
+                            <AssistantAvatar />
+                            <div className="assistant-body">
+                                <div className="assistant-header"><small>Designer</small></div>
+                                <InheritedStylePreview
+                                    event={event}
+                                    busy={isAgentWorking}
+                                    selectedStyle={selectedStyleForRun(event.run_id)}
+                                    onUse={(option) => onSubmit({
+                                        prompt: `Mình chọn phong cách "${option.name}" đã kế thừa từ Project Wiki. Hãy tiếp tục lập UI spec cho feature hiện tại theo BA package.`,
+                                        screenName: run?.screen_name || screenName || "Screen",
+                                        platform: run?.platform || platform,
+                                        styleName: option.key,
+                                        libraryIds: [],
+                                    })}
+                                    onExplore={async () => {
+                                        try {
+                                            await onExploreProjectStyles?.();
+                                        } catch (error) {
+                                            setAttachmentError((error as Error).message);
+                                        }
+                                    }}
+                                />
+                            </div>
+                        </article>
+                    ) :
                     event.type === "style.previews" ? (
                         <article className="message assistant-message style-preview-message" key={event.id}>
                             <AssistantAvatar />
@@ -800,6 +1090,7 @@ export function ChatWorkspace({
                                 <StylePreviewGallery
                                     event={event}
                                     busy={isAgentWorking}
+                                    selectedStyle={selectedStyleForRun(event.run_id)}
                                     onSelect={(option) => onSubmit({
                                         prompt: `Mình chọn phong cách "${option.name}" trong preview. Áp dụng hướng này cho các screen đã chốt và tiếp tục tạo UI spec.`,
                                         screenName: run?.screen_name || screenName || "Screen",
@@ -1063,24 +1354,7 @@ export function ChatWorkspace({
 
                                     <button
                                         className="chat-review-btn approve"
-                                        onClick={async () => {
-                                            if (
-                                                submittingReview ||
-                                                !onReview ||
-                                                finalBlocked
-                                            )
-                                                return;
-                                            setSubmittingReview(true);
-                                            try {
-                                                await onReview(
-                                                    "approved",
-                                                    reviewFeedback,
-                                                );
-                                                setReviewFeedback("");
-                                            } finally {
-                                                setSubmittingReview(false);
-                                            }
-                                        }}
+                                        onClick={() => { void approveCurrentReview(); }}
                                         disabled={
                                             finalBlocked || submittingReview
                                         }
@@ -1099,6 +1373,22 @@ export function ChatWorkspace({
                                               : "Approve Structure"}
                                     </button>
                                 </div>
+                                {wikiApprovalOpen && run.stage === "review_final" && (
+                                    <div className="designer-wiki-approval-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submittingReview) setWikiApprovalOpen(false); }}>
+                                        <section className="designer-wiki-approval" role="dialog" aria-modal="true" aria-label="Xác nhận lưu Design System vào Wiki">
+                                            <header className="designer-wiki-approval-head"><div><h2>Chốt Designer · Xác nhận Design System vào Wiki</h2><p>Preview lấy từ backend; chính snapshot này sẽ được lưu nếu bạn xác nhận. Bấm từng file để xem.</p></div><button type="button" aria-label="Đóng" onClick={() => setWikiApprovalOpen(false)} disabled={submittingReview}><X size={18} /></button></header>
+                                            <div className="designer-wiki-approval-source"><strong>{sessionId ? `Feature · ${sessionId}` : "Design feature"}</strong><span>Design System · v{wikiVersion} · nguồn Designer hiện tại</span><b>Chờ xác nhận</b></div>
+                                            {wikiPreviewError && <p className="designer-wiki-approval-note" role="alert">Không lấy được preview chính xác: {wikiPreviewError}</p>}
+                                            {designWikiFiles.length > 0 && <div className="designer-wiki-approval-files">
+                                                <nav aria-label="File Design System sẽ lưu">{designWikiFiles.map((file, index) => <button key={file.path} type="button" className={wikiPreviewIndex === index ? "is-active" : ""} onClick={() => setWikiPreviewIndex(index)}><strong>{file.path}</strong><span>{file.summary}</span></button>)}</nav>
+                                                <section className="designer-wiki-approval-preview"><strong>{designWikiFiles[wikiPreviewIndex]?.path}</strong><pre>{designWikiFiles[wikiPreviewIndex]?.content}</pre></section>
+                                            </div>}
+                                            <div className="designer-wiki-approval-meta">project_id · version · status · approved_by · source_feature · applies_to</div>
+                                            <p className="designer-wiki-approval-note">Khi xác nhận, contract JSON, Markdown, template HTML và asset manifest được lưu theo version; Basic Memory lập chỉ mục Markdown sau đó.</p>
+                                            <footer><span>Wiki chưa được cập nhật. Xác nhận mới duyệt và lưu snapshot đang xem.</span><div><button type="button" onClick={() => setWikiApprovalOpen(false)} disabled={submittingReview}>Để sau</button><button type="button" className="confirm" onClick={() => { void confirmDesignWikiApproval(); }} disabled={submittingReview || designWikiFiles.length === 0}>{submittingReview ? "Đang lưu…" : `Duyệt & lưu Design System v${wikiVersion}`}</button></div></footer>
+                                        </section>
+                                    </div>
+                                )}
                             </div>
                         </div>
                     </article>

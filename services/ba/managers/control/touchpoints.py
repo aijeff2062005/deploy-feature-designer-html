@@ -66,6 +66,40 @@ def _guess_interaction(action: str, is_last: bool) -> str:
     return "form"
 
 
+def sanitize_touchpoints(
+    items: list[Any],
+    use_cases: list[Any] | None = None,
+    *,
+    workflow_md: str = "",
+    feature_goal: str = "",
+) -> list[dict[str, Any]]:
+    """Drop table artifacts/end-state rows and retain valid use-case references."""
+    cases = [item for item in (use_cases or []) if isinstance(item, dict) and item.get("id")]
+    valid_ids = {str(item["id"]) for item in cases}
+    parsed = parse_workflow_steps(workflow_md)
+    end_state_ids = {str(value).strip() for value in parsed.get("end_state_ids", []) if str(value).strip()}
+    headers = [str(value).strip().casefold() for value in parsed.get("end_state_headers", [])]
+    goal = str(feature_goal or "").strip()
+    result: list[dict[str, Any]] = []
+    for index, raw in enumerate(items):
+        if not isinstance(raw, dict):
+            continue
+        raw_name = str(raw.get("name") or raw.get("screen") or raw.get("screen_name") or "").strip()
+        raw_actor = str(raw.get("actor") or raw.get("actor_id") or "").strip()
+        # Match rows by the parsed table structure, never by a particular ID or label.
+        if raw_name in end_state_ids:
+            continue
+        if len(headers) > 1 and raw_name.casefold() == headers[0] and raw_actor.casefold() == headers[1]:
+            continue
+        item = normalize_touchpoint(raw, index)
+        if goal and item["goal"].strip() == goal:
+            item["goal"] = ""
+        item["related_uc_ids"] = list(dict.fromkeys(
+            str(value) for value in item.get("related_uc_ids", []) if str(value) in valid_ids
+        ))
+        result.append(item)
+    return result
+
 def generate_touchpoints(state: dict[str, Any]) -> list[dict[str, Any]]:
     artifacts = state.get("artifacts") or {}
     workflow = artifacts.get("workflow") or {}
@@ -104,7 +138,7 @@ def generate_touchpoints(state: dict[str, Any]) -> list[dict[str, Any]]:
                         "actor": actor or (actors[0] if actors else "ACT-USER"),
                         "trigger": action,
                         "screen": action,
-                        "goal": str(fd.get("goal") or ""),
+                        "goal": str(step.get("goal") or ""),
                         "notes": step.get("br_ref") or "",
                         "related_uc_ids": related[:4],
                         "bpmn_node_id": f"Task_{i + 1}",
@@ -125,7 +159,7 @@ def generate_touchpoints(state: dict[str, Any]) -> list[dict[str, Any]]:
                         "actor": uc.get("actor_id") or "",
                         "trigger": uc.get("statement") or "",
                         "screen": uc.get("id") or f"Screen {i + 1}",
-                        "goal": str(fd.get("goal") or ""),
+                        "goal": str(uc.get("goal") or ""),
                         "notes": "",
                         "related_uc_ids": [uc.get("id")] if uc.get("id") else [],
                         "bpmn_node_id": f"Task_{i + 1}",
@@ -134,22 +168,6 @@ def generate_touchpoints(state: dict[str, Any]) -> list[dict[str, Any]]:
                     i,
                 )
             )
-    if not touchpoints:
-        touchpoints.append(
-            normalize_touchpoint(
-                {
-                    "id": "UIT-01",
-                    "name": "Primary screen",
-                    "actor": _actor_id(actors[0] if actors else "ACT-USER"),
-                    "trigger": "User opens the feature",
-                    "screen": str(state.get("feature_title") or "Feature screen"),
-                    "goal": str(fd.get("goal") or ""),
-                    "interaction": "form",
-                    "bpmn_node_id": "Task_1",
-                },
-                0,
-            )
-        )
     return touchpoints
 
 
@@ -164,10 +182,18 @@ def ensure_touchpoints_artifact(
         if isinstance(existing, dict):
             existing = existing.get("ui_touchpoints") or existing.get("items") or []
         if isinstance(existing, list) and existing:
-            normalized = [normalize_touchpoint(item, i) for i, item in enumerate(existing)]
-            artifacts["ui_touchpoints"] = normalized
-            state["artifacts"] = artifacts
-            return normalized
+            workflow = artifacts.get("workflow") or {}
+            fd = artifacts.get("feature_definition") or {}
+            normalized = sanitize_touchpoints(
+                existing,
+                artifacts.get("use_cases") or [],
+                workflow_md=str(workflow.get("workflow_md_content") or ""),
+                feature_goal=str(fd.get("goal") or ""),
+            )
+            if normalized:
+                artifacts["ui_touchpoints"] = normalized
+                state["artifacts"] = artifacts
+                return normalized
     items = generate_touchpoints(state)
     artifacts["ui_touchpoints"] = items
     state["artifacts"] = artifacts
@@ -178,8 +204,15 @@ def ensure_touchpoints_artifact(
 
 
 def replace_touchpoints(state: dict[str, Any], items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    normalized = [normalize_touchpoint(item, i) for i, item in enumerate(items)]
     artifacts = dict(state.get("artifacts") or {})
+    workflow = artifacts.get("workflow") or {}
+    fd = artifacts.get("feature_definition") or {}
+    normalized = sanitize_touchpoints(
+        items,
+        artifacts.get("use_cases") or [],
+        workflow_md=str(workflow.get("workflow_md_content") or ""),
+        feature_goal=str(fd.get("goal") or ""),
+    )
     artifacts["ui_touchpoints"] = normalized
     state["artifacts"] = artifacts
     sections = dict(state.get("sections_status") or {})

@@ -172,6 +172,9 @@ _uc_flags_instruction = (
     if _uc_prompt.exists()
     else "Đánh giá UC-F5/UC-F8. Trả SemanticFlagsEvaluation JSON. KHÔNG gọi tool."
 )
+_uc_flags_instruction += (
+    "\n\nIf FEATURE DEFINITION.continuity.incoming_handoffs contains approved predecessor branches, verify that every applicable branch is represented by a happy-path AC Given. Each Given must match its recorded entry_state and cite its predecessor feature ID, approved version and End State ID. Return NOT_YET_REASONABLE for UC-F8 if any branch is missing, ambiguous or contradictory. Do not require incoming references when the feature has no predecessor."
+)
 
 _uc_extractor = LlmAgent(
     name="uc_extractor",
@@ -214,6 +217,7 @@ _uc_discussion = LlmAgent(
         "Không dùng mã flag (UC-F1…) với User. Nhắc OQ/Assumptions nếu có. "
         "Khi story active đủ và PO nói xong, mới mở US tiếp theo. "
         "Không yêu cầu N stories để Validate — tối thiểu 1 là đủ. "
+        "When FEATURE DEFINITION.continuity has incoming_handoffs, search/fetch each approved source and map every applicable End State to a happy-path Given/AC. Include predecessor feature ID, approved version and End State ID for each mapping. If branches have different starting conditions, preserve them as separate ACs or stories; ask the user to resolve missing/conflicting mappings and never guess. "
         "You have tools: `wiki.search_pages` / `wiki.fetch_page` before inventing; "
         "do NOT `web_search` for FD scope_out / non-goals / unrelated browsing; "
         "`web_search` only after wiki miss for in-package clarification "

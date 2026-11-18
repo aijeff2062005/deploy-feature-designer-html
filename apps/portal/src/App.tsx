@@ -1208,6 +1208,7 @@ const KIND: Record<Artifact["kind"], { label: string; icon: ReactNode; cls: stri
   bpmn: { label: "BPMN", icon: <Workflow size={16} />, cls: "ba" },
   ui_spec: { label: "UI specification", icon: <FileJson size={16} />, cls: "designer" },
   designer_output: { label: "Thiết kế", icon: <Layers size={16} />, cls: "designer" },
+  project_design_wiki: { label: "Wiki thiết kế", icon: <BookOpen size={16} />, cls: "designer" },
 };
 
 function AssetsTab({ projectId }: { projectId: string }) {

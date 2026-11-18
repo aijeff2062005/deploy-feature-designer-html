@@ -22,7 +22,7 @@ logger = logging()
 OQ_SYNC_VERSION = 2
 
 _OQ_ANSWER_RE = re.compile(
-    r"(?:trả\s*lời|traloi|answer|resolve)?\s*(OQ-\d{3})\s*[:：\-–]\s*(.+)",
+    r"(?:answer|resolve)?\s*`?(OQ-\d+)`?\s*[:\uFF1A\-\u2013]\s*",
     re.IGNORECASE,
 )
 
@@ -46,94 +46,34 @@ def _canonicalize_artifact_refs(refs: Any, state: dict[str, Any]) -> list[dict[s
     return normalized
 
 
-def _oq_domains(text: str) -> dict[str, tuple[str, ...]]:
-    domains: dict[str, tuple[str, ...]] = {}
-    if re.search(r"sso|microsoft|google|single sign|liên kết tài khoản|đồng bộ tài khoản", text, re.I):
-        domains["sso"] = (r"sso", r"microsoft", r"google", r"single sign", r"liên kết tài khoản", r"đồng bộ tài khoản")
-    if re.search(r"mật khẩu|password|đặt lại|reset", text, re.I):
-        domains["password"] = (r"mật khẩu", r"password", r"đặt lại", r"reset")
-    if re.search(r"otp|mã xác thực|gửi lại mã|khôi phục|recovery", text, re.I):
-        domains["otp"] = (r"otp", r"mã xác thực", r"gửi lại mã", r"khôi phục", r"recovery")
-    return domains
-
-
-def _infer_oq_artifact_refs(question: dict[str, Any], state: dict[str, Any]) -> list[dict[str, str]]:
-    """Find the existing BA artifacts an answered authentication OQ can affect."""
-    text = " ".join(
-        str(question.get(key) or "") for key in ("question", "answer", "impact")
-    )
-    domains = _oq_domains(text)
-    if not domains:
-        return []
-    artifacts = state.get("artifacts") or {}
-    refs: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-
-    def add(artifact_type: str, artifact_id: str, content: str) -> None:
-        matched = []
-        for domain, patterns in domains.items():
-            candidates = list(patterns)
-            if artifact_type == "ui_touchpoints":
-                if domain == "sso":
-                    candidates.extend((r"login", r"sign.?in", r"đăng nhập"))
-                elif domain == "password":
-                    candidates.extend((r"forgot", r"quên mật khẩu"))
-                elif domain == "otp":
-                    candidates.extend((r"forgot", r"quên mật khẩu", r"verification", r"xác thực"))
-            if any(re.search(pattern, content, re.I) for pattern in candidates):
-                matched.append(domain)
-        key = (artifact_type, artifact_id.upper())
-        if matched and key not in seen:
-            refs.append({
-                "artifact_type": artifact_type,
-                "artifact_id": artifact_id,
-                "reason": f"OQ impacts {', '.join(matched)} authentication rules/flow.",
-            })
-            seen.add(key)
-
-    for item in artifacts.get("business_rules") or []:
-        if isinstance(item, dict) and item.get("id"):
-            add("business_rules", str(item["id"]), json.dumps(item, ensure_ascii=False))
-
-    workflow = artifacts.get("workflow") or {}
-    workflow_text = str(workflow.get("workflow_md_content") or "") if isinstance(workflow, dict) else str(workflow)
-    heading = re.compile(
-        r"(?im)^#{1,3}[^\n]*\b(WF-[A-Z0-9]+(?:-[A-Z0-9]+)*-\d+)\b[^\n]*(?:\n|$)"
-    )
-    headings = list(heading.finditer(workflow_text))
-    for index, match in enumerate(headings):
-        end = headings[index + 1].start() if index + 1 < len(headings) else len(workflow_text)
-        add("workflow", match.group(1).upper(), workflow_text[match.start():end])
-
-    for item in artifacts.get("use_cases") or []:
-        if isinstance(item, dict) and item.get("id"):
-            add("use_cases", str(item["id"]), json.dumps(item, ensure_ascii=False))
-
-    touchpoints = artifacts.get("ui_touchpoints") or []
-    if isinstance(touchpoints, dict):
-        touchpoints = touchpoints.get("ui_touchpoints") or touchpoints.get("items") or []
-    for item in touchpoints:
-        if isinstance(item, dict) and item.get("id"):
-            add("ui_touchpoints", str(item["id"]), json.dumps(item, ensure_ascii=False))
-
-    return refs
-
-
 def _resolve_oq_artifact_refs(question: dict[str, Any], state: dict[str, Any]) -> list[dict[str, Any]]:
-    text = " ".join(str(question.get(key) or "") for key in ("question", "answer", "impact"))
-    domains = _oq_domains(text)
     refs = _canonicalize_artifact_refs(question.get("affected_artifacts") or [], state)
-    # Authentication-policy OQs belong in the related BR/Workflow/US artifacts,
-    # not the Feature Definition singleton merely because a detector guessed an FD ID.
-    if domains:
-        refs = [ref for ref in refs if ref.get("artifact_type") != "feature_definition"]
-    by_key = {
-        (str(ref.get("artifact_type") or ""), str(ref.get("artifact_id") or "").upper()): ref
-        for ref in refs
-    }
-    for ref in _infer_oq_artifact_refs(question, state):
-        by_key[(ref["artifact_type"], ref["artifact_id"].upper())] = ref
-    return list(by_key.values())
+    # An OQ raised in a section can update that section's artifact as well as
+    # other explicitly referenced artifacts. Use provenance, not domain keywords.
+    source_type = str(question.get("source_section") or "")
+    source = (state.get("artifacts") or {}).get(source_type)
+    if isinstance(source, dict) and source:
+        refs.extend(
+            _canonicalize_artifact_refs(
+                [
+                    {
+                        "artifact_type": source_type,
+                        "artifact_id": str(source.get("id") or source_type),
+                        "reason": "The answered question originated in this section.",
+                    }
+                ],
+                state,
+            )
+        )
+    unique: dict[tuple[str, str], dict[str, Any]] = {}
+    for ref in refs:
+        key = (
+            str(ref.get("artifact_type") or ""),
+            str(ref.get("artifact_id") or "").upper(),
+        )
+        if key[0] and key[1]:
+            unique[key] = ref
+    return list(unique.values())
 
 
 def user_text_from_context(callback_context: Any) -> str:
@@ -148,14 +88,18 @@ def user_text_from_context(callback_context: Any) -> str:
 
 
 def resolutions_from_user_message(user_message: str) -> list[dict[str, str]]:
-    """Deterministic OQ answers: 'OQ-001: …' or 'Trả lời OQ-001: …'."""
+    """Extract explicitly labeled OQ answers, including Markdown and inline lists."""
     found: list[dict[str, str]] = []
     if not user_message:
         return found
     seen: set[str] = set()
-    for match in _OQ_ANSWER_RE.finditer(user_message):
+    matches = list(_OQ_ANSWER_RE.finditer(user_message))
+    for index, match in enumerate(matches):
         oq_id = match.group(1).upper()
-        answer = match.group(2).strip()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(user_message)
+        answer = user_message[match.end():end].strip()
+        answer = re.split(r"\s{2,}\d+\.\s+", answer, maxsplit=1)[0]
+        answer = re.sub(r"[,;]\s*$", "", answer).strip(" \t\r\n`*_:-")
         if oq_id in seen or len(answer) < 3:
             continue
         seen.add(oq_id)

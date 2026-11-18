@@ -3,7 +3,7 @@
 // browser, turned into File objects and parsed like a file dropped from disk.
 import { projectId } from "./platform";
 
-export type ProjectFileKind = "ba_package" | "bpmn" | "ui_spec" | "designer_output" | "wiki_source";
+export type ProjectFileKind = "ba_package" | "bpmn" | "ui_spec" | "designer_output" | "wiki_source" | "project_design_wiki";
 
 export type ProjectFile = {
     id: string;
@@ -31,6 +31,7 @@ export const KIND_LABEL: Record<ProjectFileKind, string> = {
     ui_spec: "UI spec",
     designer_output: "Thiết kế",
     wiki_source: "Wiki",
+    project_design_wiki: "Wiki thiết kế",
 };
 
 let cache: Promise<ProjectFile[]> | null = null;
