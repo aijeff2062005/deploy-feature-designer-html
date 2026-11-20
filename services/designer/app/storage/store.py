@@ -696,36 +696,83 @@ class Store:
         )
         if row is None:
             return None
-        current_baseline = json.loads(row["baseline_json"])
-        try:
-            from wiki.project_files import ProjectFileWiki
+        current_baseline: dict[str, Any] | None = None
+        from wiki.project_files import ProjectFileWiki
 
-            files = ProjectFileWiki()
-            if files.exists(project_id, "design-system/design-system.json"):
-                current_baseline = json.loads(
-                    files.read(project_id, "design-system/design-system.json").decode("utf-8")
+        files = ProjectFileWiki()
+        try:
+            from wiki.basic_memory import BasicMemoryClient
+
+            note = await asyncio.to_thread(
+                BasicMemoryClient().read_note,
+                project_id,
+                files.markdown_root(project_id),
+                "design-system.md",
+            )
+            content = note.get("content", note.get("markdown", ""))
+            if not isinstance(content, str) or not content:
+                raise ValueError("Basic Memory bm_read returned no Markdown content")
+            metadata, _ = files.parse_markdown(content)
+            if str(metadata.get("version")) != str(row["version"]):
+                raise ValueError(
+                    f"Basic Memory Project Wiki version {metadata.get('version')} "
+                    f"does not match metadata version {row['version']}"
                 )
-        except Exception:
-            logger.exception("Could not read canonical Design Wiki JSON for %s; using metadata cache", project_id)
+            candidate = metadata.get("baseline")
+            if isinstance(candidate, dict):
+                current_baseline = candidate
+        except Exception as error:
+            # Rows written before Basic Memory became canonical still live in the
+            # shared Markdown/JSON files. Only use these when bm_read says the note
+            # is absent; network, checksum, or parse errors should remain visible.
+            message = str(error).casefold()
+            legacy_note_missing = "not_found" in message or "not found" in message
+            if not legacy_note_missing:
+                logger.exception("Could not read canonical Basic Memory Design Wiki for %s", project_id)
+                raise
+            if files.exists(project_id, "design-system.md"):
+                content = files.read(project_id, "design-system.md").decode("utf-8")
+                metadata, _ = files.parse_markdown(content)
+                candidate = metadata.get("baseline")
+                if isinstance(candidate, dict):
+                    current_baseline = candidate
+            if current_baseline is None and files.exists(project_id, "design-system/design-system.json"):
+                candidate = json.loads(files.read(project_id, "design-system/design-system.json").decode("utf-8"))
+                current_baseline = candidate if isinstance(candidate, dict) else None
+        if current_baseline is None and row["baseline_json"]:
+            current_baseline = json.loads(row["baseline_json"])
+        if current_baseline is None:
+            raise ValueError(f"Project Design Wiki note for {project_id} is missing its baseline")
         versions = await self._fetchall(
-            "SELECT version, baseline_json, source_session_id, source_feature_id, updated_at "
+            "SELECT version, baseline_json, source_session_id, source_feature_id, updated_at, markdown_key "
             "FROM project_design_wiki_versions WHERE project_id=? ORDER BY version DESC",
             (project_id,),
         )
+        from platform_core.storage import get_storage
+        from wiki.project_files import ProjectFileWiki
+
+        files = ProjectFileWiki()
+        storage = get_storage()
         version_items = []
         for item in versions:
-            version_baseline = json.loads(item["baseline_json"])
+            version_baseline = None
             try:
-                from wiki.project_files import ProjectFileWiki
-
-                path = f"design-system/design-system.v{int(item['version']):04d}.json"
-                files = ProjectFileWiki()
-                if files.exists(project_id, path):
-                    version_baseline = json.loads(files.read(project_id, path).decode("utf-8"))
+                snapshot = storage.get(item["markdown_key"]).decode("utf-8")
+                metadata, _ = files.parse_markdown(snapshot)
+                candidate = metadata.get("baseline")
+                if isinstance(candidate, dict):
+                    version_baseline = candidate
             except Exception:
-                logger.exception("Could not read Designer Wiki JSON v%s for %s; using metadata cache",
-                                 item["version"], project_id)
-            version_items.append({**dict(item), "baseline": version_baseline})
+                logger.exception("Could not read Project Wiki snapshot v%s for %s", item["version"], project_id)
+            if version_baseline is None and item["baseline_json"]:
+                version_baseline = json.loads(item["baseline_json"])
+            version_items.append({
+                "version": item["version"],
+                "source_session_id": item["source_session_id"],
+                "source_feature_id": item["source_feature_id"],
+                "updated_at": item["updated_at"],
+                "baseline": version_baseline or {},
+            })
         return {
             "version": row["version"],
             "baseline": current_baseline,
@@ -754,12 +801,12 @@ class Store:
                     )
                 from platform_core.storage import get_storage
                 from .layout import project_design_wiki_key
-
-                markdown_key = project_design_wiki_key(project_id, version)
-                get_storage().put(markdown_key, markdown.encode("utf-8"), content_type="text/markdown; charset=utf-8")
+                from wiki.basic_memory import BasicMemoryClient
                 from wiki.project_files import ProjectFileWiki
 
-                files = ProjectFileWiki()
+                storage = get_storage()
+                files = ProjectFileWiki(storage)
+                markdown_key = project_design_wiki_key(project_id, version)
                 project_payload = {
                     **baseline,
                     "schema_version": "1.0",
@@ -771,35 +818,58 @@ class Store:
                     "source_session_id": str(session_id),
                     "source_feature_id": source_feature_id,
                 }
-                files.write_json(project_id, f"design-system/design-system.v{version:04d}.json", project_payload)
-                files.write_json(project_id, "design-system/design-system.json", project_payload)
-                files.write_markdown(
-                    project_id, "design-system.md", title="Project Design System",
-                    document_type="design_system", version=str(version), status="approved", body=markdown,
-                    metadata={"source_session_id": str(session_id), "source_feature_id": source_feature_id,
-                              "approved_by": project_payload["approved_by"], "approved_at": now},
+                note_metadata = {
+                    "title": "Project Design System",
+                    "type": "design_system",
+                    "project_id": project_id,
+                    "version": str(version),
+                    "status": "approved",
+                    "baseline": baseline,
+                    "source_session_id": str(session_id),
+                    "source_feature_id": source_feature_id,
+                    "approved_by": project_payload["approved_by"],
+                    "approved_at": now,
+                }
+                note = files._yaml(note_metadata) + markdown.rstrip() + "\n"
+                snapshot_bytes = note.encode("utf-8")
+                storage.put(markdown_key, snapshot_bytes, content_type="text/markdown; charset=utf-8")
+
+                # Basic Memory owns the current Markdown note. Platform storage
+                # keeps an S3-backed copy when it is the configured storage backend.
+                memory = BasicMemoryClient()
+                root = files.markdown_root(project_id)
+                memory.ensure_project(project_id, root)
+                note_path = "design-system.md"
+                note_key = files.key(project_id, note_path)
+                current_checksum = None
+                try:
+                    current = memory.read_note(project_id, root, note_path)
+                    current_checksum = current.get("checksum")
+                    if not current_checksum:
+                        raise RuntimeError("Basic Memory bm_read did not return a note checksum")
+                except RuntimeError as error:
+                    if "not_found" not in str(error).casefold() and "not found" not in str(error).casefold():
+                        raise
+                memory.write_note(
+                    project_id, root, note_path, note,
+                    expected_checksum=current_checksum,
                 )
-                files.write_markdown(
-                    project_id, f"history/design-system/v{version:04d}.md", title="Project Design System",
-                    document_type="design_system", version=str(version), status="approved", body=markdown,
-                    metadata={"source_session_id": str(session_id), "source_feature_id": source_feature_id,
-                              "approved_by": project_payload["approved_by"], "approved_at": now},
-                )
-                payload = json.dumps(baseline, ensure_ascii=False)
+                storage.put(note_key, note.encode("utf-8"), content_type="text/markdown; charset=utf-8")
+
                 db.execute(self._sql(
                     "INSERT INTO project_design_wiki_versions "
                     "(project_id, version, baseline_json, markdown_key, source_session_id, source_feature_id, updated_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?)"
-                ), (project_id, version, payload, markdown_key, str(session_id), source_feature_id, now))
+                ), (project_id, version, None, markdown_key, str(session_id), source_feature_id, now))
                 db.execute(self._sql(
                     "INSERT INTO project_design_wiki "
                     "(project_id, version, baseline_json, markdown_key, source_session_id, source_feature_id, updated_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(project_id) DO UPDATE SET "
-                    "version=EXCLUDED.version, baseline_json=EXCLUDED.baseline_json, "
+                    "version=EXCLUDED.version, baseline_json=NULL, "
                     "markdown_key=EXCLUDED.markdown_key, "
                     "source_session_id=EXCLUDED.source_session_id, source_feature_id=EXCLUDED.source_feature_id, "
                     "updated_at=EXCLUDED.updated_at"
-                ), (project_id, version, payload, markdown_key,
+                ), (project_id, version, None, markdown_key,
                     str(session_id), source_feature_id, now))
                 return version
         return await self._call(save)
@@ -814,26 +884,18 @@ class Store:
         )
         if row is None:
             raise ValueError(f"Project Design Wiki version {version} was not found")
-        baseline = json.loads(row["baseline_json"])
-        markdown = None
-        try:
-            from wiki.project_files import ProjectFileWiki
+        from platform_core.storage import get_storage
+        from wiki.project_files import ProjectFileWiki
 
-            files = ProjectFileWiki()
-            version_path = f"design-system/design-system.v{version:04d}.json"
-            if files.exists(project_id, version_path):
-                baseline = json.loads(files.read(project_id, version_path).decode("utf-8"))
-            markdown_path = f"history/design-system/v{version:04d}.md"
-            if files.exists(project_id, markdown_path):
-                content = files.read(project_id, markdown_path).decode("utf-8")
-                parts = content.split("---", 2)
-                markdown = parts[2].strip() if len(parts) == 3 else content
-        except Exception:
-            logger.exception("Could not restore from Designer Wiki files for %s v%s", project_id, version)
-        if markdown is None:
-            from platform_core.storage import get_storage
-
-            markdown = get_storage().get(row["markdown_key"]).decode("utf-8")
+        content = get_storage().get(row["markdown_key"]).decode("utf-8")
+        metadata, markdown = ProjectFileWiki.parse_markdown(content)
+        baseline = metadata.get("baseline")
+        if not isinstance(baseline, dict):
+            if not row["baseline_json"]:
+                raise ValueError(f"Project Design Wiki baseline for version {version} was not found")
+            baseline = json.loads(row["baseline_json"])
+        if not markdown.strip():
+            raise ValueError(f"Project Design Wiki Markdown for version {version} was empty")
         return await self.approve_project_design_baseline(
             project_id, baseline, markdown,
             UUID(row["source_session_id"]), row["source_feature_id"], approved_by=approved_by or "restore",

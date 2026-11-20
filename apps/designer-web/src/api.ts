@@ -74,7 +74,7 @@ export const api = {
         request<ProjectWikiResponse>(`/project-wiki?project_id=${encodeURIComponent(projectId)}`),
     projectWikiPreview: (runId: string) =>
         request<{ run_id: string; revision: number; project_id: string; version: number; approved_at: string;
-            files: { path: string; content: string; screen_name?: string; platform?: string }[] }>(
+            files: { path: string; content: string; screen_name?: string; platform?: string; mime_type?: string }[] }>(
             `/runs/${runId}/project-wiki-preview`,
         ),
     restoreProjectWiki: (projectId: string, version: number) =>

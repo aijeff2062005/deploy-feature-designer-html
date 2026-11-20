@@ -236,6 +236,12 @@ class DesignDirection(BaseModel):
     do: list[str] = Field(default_factory=list, max_length=6)
     dont: list[str] = Field(default_factory=list, max_length=6)
 
+    @field_validator("radius", mode="before")
+    @classmethod
+    def normalize_radius(cls, value: Any) -> Any:
+        """Map the common CSS radius token to the largest supported semantic token."""
+        return "2xl" if isinstance(value, str) and value.strip().lower() == "full" else value
+
 
 class ScenarioTargetCheck(BaseModel):
     """Explicit link from an approved trigger to the UI region it governs."""

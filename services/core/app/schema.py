@@ -13,9 +13,22 @@ CREATE TABLE IF NOT EXISTS projects (
   id          TEXT PRIMARY KEY,
   name        TEXT NOT NULL,
   description TEXT NOT NULL DEFAULT '',
+  huly_url    TEXT NOT NULL DEFAULT '',
+  huly_project_id TEXT NOT NULL DEFAULT '',
+  huly_project_name TEXT NOT NULL DEFAULT '',
   created_by  TEXT REFERENCES users(id),
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   archived_at TIMESTAMPTZ
+);
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS huly_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS huly_project_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS huly_project_name TEXT NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS project_wiki_bootstrap (
+  project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','ready','failed')),
+  template_version TEXT,
+  error TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS project_members (
   project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,

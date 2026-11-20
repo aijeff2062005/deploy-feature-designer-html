@@ -210,9 +210,16 @@ class WikiStore:
                     if row:
                         result = self._hit_from_row(row)
                         result["score"] = hit.get("score")
+                        result["snippet"] = str(
+                            hit.get("snippet") or hit.get("excerpt") or result["snippet"]
+                        )
                         bm_hits.append(result)
                     elif path.replace("\\", "/").casefold().startswith("features/"):
-                        metadata = files.read_metadata(project_id, path.replace("\\", "/"))
+                        note = BasicMemoryClient(bm_url).read_note(
+                            project_id, files.markdown_root(project_id), path.replace("\\", "/"),
+                        )
+                        content = str(note.get("content", note.get("markdown", "")) or "")
+                        metadata, note_body = files.parse_markdown(content)
                         if (metadata.get("project_id") != project_id
                                 or metadata.get("status") != "approved"
                                 or metadata.get("type") != "ba_feature"):
@@ -224,9 +231,6 @@ class WikiStore:
                             (artifact_id, project_id),
                         ).fetchone()
                         if artifact:
-                            note = files.read(project_id, path.replace("\\", "/")).decode("utf-8")
-                            note_parts = note.split("---", 2)
-                            note_body = note_parts[2].strip() if len(note_parts) == 3 else note
                             bm_hits.append({
                                 "page_id": artifact["id"], "artifact_id": artifact["id"],
                                 "feature_id": metadata.get("feature_id"),
@@ -250,11 +254,11 @@ class WikiStore:
             args.append(bucket_id)
         if query:
             sql.append(
-                "AND (title LIKE ? OR body LIKE ? OR ifnull(abbrev,'') LIKE ? "
-                "OR ifnull(expansion,'') LIKE ?)"
+                "AND (title LIKE ? OR ifnull(abbrev,'') LIKE ? OR ifnull(expansion,'') LIKE ? "
+                "OR (namespace = ? AND body LIKE ?))"
             )
             like = f"%{query}%"
-            args.extend([like, like, like, like])
+            args.extend([like, like, like, NAMESPACE_COMPANY, like])
         sql.append("ORDER BY updated_at DESC, page_id ASC LIMIT ?")
         args.append(max(1, min(limit, 50)))
         rows = self.conn.execute(" ".join(sql), args).fetchall()
@@ -285,10 +289,10 @@ class WikiStore:
             "SELECT * FROM wiki_page WHERE page_id = ?", (page_id,)
         ).fetchone()
         if not row:
-            # Feature notes map back to an approved project Asset. Recheck the
-            # artifact's project and type in PostgreSQL before reading its JSON.
+            # Feature notes map back to approved artifact metadata in PostgreSQL;
+            # the actual Wiki body is read from its Basic Memory note.
             artifact = self.conn.execute(
-                "SELECT id, project_id, title, version, storage_key, created_at FROM core.artifacts "
+                "SELECT id, project_id, title, version, storage_key, created_at, meta FROM core.artifacts "
                 "WHERE id=? AND project_id=? AND kind='ba_package'",
                 (page_id, project_id),
             ).fetchone()
@@ -302,9 +306,37 @@ class WikiStore:
                 return None
             if artifact["project_id"] != project_id:
                 return None
-            from platform_core.storage import get_storage
+            try:
+                from managers.service.assets import feature_markdown_path
+                from wiki.basic_memory import BasicMemoryClient
+                from wiki.project_files import ProjectFileWiki
 
-            package = get_storage().get(artifact["storage_key"]).decode("utf-8")
+                files = ProjectFileWiki()
+                meta = artifact["meta"] or {}
+                if isinstance(meta, str):
+                    import json
+                    meta = json.loads(meta)
+                feature_id = str(meta.get("feature_id") or artifact["id"])
+                note_path = feature_markdown_path(project_id, artifact["title"], feature_id, files)
+                note = BasicMemoryClient().read_note(
+                    project_id, files.markdown_root(project_id), note_path,
+                )
+                content = str(note.get("content", note.get("markdown", "")) or "")
+                note_metadata, package = files.parse_markdown(content)
+                if (note_metadata.get("source_artifact_id") != artifact["id"]
+                        or str(note_metadata.get("source_version")) != str(artifact["version"])
+                        or note_metadata.get("status") != "approved"):
+                    raise ValueError("Basic Memory feature note metadata does not match its artifact")
+            except Exception as error:
+                message = str(error).casefold()
+                if ("not_found" in message or "not found" in message
+                        or "basic_memory_mcp_url is not configured" in message):
+                    from platform_core.storage import get_storage
+
+                    package = get_storage().get(artifact["storage_key"]).decode("utf-8")
+                else:
+                    logger.exception("Could not read canonical Basic Memory feature Wiki for artifact %s", page_id)
+                    return None
             return {
                 "page_id": artifact["id"], "artifact_id": artifact["id"],
                 "namespace": NAMESPACE_PROJECT, "project_id": project_id,
@@ -337,18 +369,36 @@ class WikiStore:
         body = page["body"]
         if ns == NAMESPACE_PROJECT:
             try:
+                from wiki.basic_memory import BasicMemoryClient
                 from wiki.project_files import ProjectFileWiki
 
                 safe_id = re.sub(r"[^A-Za-z0-9_-]", "-", str(page_id)).strip("-")[:100] or "page"
-                content = ProjectFileWiki().read(project_id, f"pages/{safe_id}.md").decode("utf-8")
-                parts = content.split("---", 2)
-                if len(parts) == 3:
-                    body = parts[2].strip()
-                    heading = f"# {page['title']}"
-                    if body.startswith(heading):
-                        body = body[len(heading):].lstrip()
-            except Exception:
-                pass  # Pre-migration pages remain available from the PostgreSQL record.
+                files = ProjectFileWiki()
+                note = BasicMemoryClient().read_note(
+                    project_id, files.markdown_root(project_id), f"pages/{safe_id}.md",
+                )
+                content = note.get("content", note.get("markdown", ""))
+                metadata, body = files.parse_markdown(content)
+                if (str(metadata.get("version")) != str(page["version"])
+                        or metadata.get("page_id") != page_id
+                        or metadata.get("project_id") != project_id
+                        or metadata.get("status") != page["status"]):
+                    raise ValueError("Basic Memory page metadata does not match PostgreSQL metadata")
+                heading = f"# {page['title']}"
+                if body.startswith(heading):
+                    body = body[len(heading):].lstrip()
+                footer = f"Source Wiki page: `{page_id}`."
+                if body.rstrip().endswith(footer):
+                    body = body.rstrip()[:-len(footer)].rstrip()
+            except Exception as error:
+                message = str(error).casefold()
+                legacy_fallback = (
+                    "not_found" in message or "not found" in message
+                    or "basic_memory_mcp_url is not configured" in message
+                )
+                if not body or not legacy_fallback:
+                    logger.exception("Could not read canonical BA Project Wiki page %s", page_id)
+                    return None
 
         return {
             "page_id": page["page_id"],

@@ -43,7 +43,7 @@ class WikiSource(BaseModel):
     namespace: str
     project_id: str | None = None
     storage_uri: str
-    markdown_extract: str
+    markdown_extract: str | None = None
     page_map: list[dict[str, Any]] = Field(default_factory=list)
     ingested_at: str
     ingested_by: str
@@ -71,7 +71,7 @@ class WikiRevision(BaseModel):
     page_id: str
     version: str
     status: str
-    body_snapshot: str
+    body_snapshot: str | None = None
     diff_ref: str | None = None
     actor: str
     created_at: str

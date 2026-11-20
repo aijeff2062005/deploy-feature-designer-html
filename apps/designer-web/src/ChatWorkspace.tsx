@@ -590,9 +590,10 @@ export function ChatWorkspace({
     const [selection, setSelection] = useState<CanvasSelection>();
     const [submittingReview, setSubmittingReview] = useState(false);
     const [wikiApprovalOpen, setWikiApprovalOpen] = useState(false);
+    const [loadingWikiPreview, setLoadingWikiPreview] = useState(false);
     const [wikiPreviewIndex, setWikiPreviewIndex] = useState(0);
     const [wikiVersion, setWikiVersion] = useState(1);
-    const [wikiPreviewFiles, setWikiPreviewFiles] = useState<{ path: string; content: string; screen_name?: string; platform?: string }[]>([]);
+    const [wikiPreviewFiles, setWikiPreviewFiles] = useState<{ path: string; content: string; screen_name?: string; platform?: string; mime_type?: string }[]>([]);
     const [wikiPreviewError, setWikiPreviewError] = useState("");
     const [activityLogOpen, setActivityLogOpen] = useState(false);
     const [hulyDialogOpen, setHulyDialogOpen] = useState(false);
@@ -634,22 +635,32 @@ export function ChatWorkspace({
     const finalBlocked = false;
     const designWikiFiles = wikiPreviewFiles.map((file) => ({
         ...file,
-        summary: file.path.endsWith(".json")
-            ? "JSON lưu trong Project Wiki"
-            : file.path.endsWith(".md")
-              ? "Markdown lưu trong Project Wiki"
-              : `HTML template${file.screen_name ? ` · ${file.screen_name}` : ""}${file.platform ? ` · ${file.platform}` : ""}`,
+        summary: file.path.endsWith("/design-system.json")
+            ? "Style contract ?? ch?n, l?u trong Project Wiki"
+            : file.path.endsWith("manifest.json")
+              ? "Manifest phi?n b?n v? tham chi?u t?i nguy?n"
+              : file.path.endsWith(".md")
+                ? "T?i li?u Design System trong Project Wiki"
+                : file.path.endsWith(".css")
+                  ? "CSS c?a m?u UI ?? ch?n"
+                  : file.path.endsWith(".jpg")
+                    ? "?nh preview c?a m?u UI ?? ch?n"
+                    : file.path.endsWith(".html")
+                      ? "HTML d?ng chung t? m?u UI ?? ch?n"
+                      : "T?p Design System trong Project Wiki",
     }));
 
     const approveCurrentReview = async () => {
         if (submittingReview || !onReview || finalBlocked) return;
         if (run?.stage === "review_final") {
+            setLoadingWikiPreview(true);
             setWikiPreviewError("");
             try {
                 const preview = await api.projectWikiPreview(run.id);
                 setWikiVersion(preview.version);
                 setWikiPreviewFiles(preview.files);
-                setWikiPreviewIndex(0);
+                const sampleImage = preview.files.findIndex((file) => file.path.endsWith(".jpg"));
+                setWikiPreviewIndex(sampleImage >= 0 ? sampleImage : 0);
             } catch (error) {
                 setWikiPreviewFiles([]);
                 setWikiPreviewError((error as Error).message || "Không tạo được bản xem trước Project Wiki.");
@@ -1356,8 +1367,9 @@ export function ChatWorkspace({
                                         className="chat-review-btn approve"
                                         onClick={() => { void approveCurrentReview(); }}
                                         disabled={
-                                            finalBlocked || submittingReview
+                                            finalBlocked || submittingReview || loadingWikiPreview
                                         }
+                                        aria-busy={loadingWikiPreview}
                                         title={
                                             finalBlocked
                                                 ? "Resolve blocking layout findings first"
@@ -1365,12 +1377,16 @@ export function ChatWorkspace({
                                         }
                                         type="button"
                                     >
-                                        <Check size={15} />
-                                        {submittingReview
-                                            ? "Processing..."
-                                            : run.stage === "review_final"
-                                              ? "Approve Design"
-                                              : "Approve Structure"}
+                                        {loadingWikiPreview
+                                            ? <LoaderCircle className="designer-wiki-approval-spinner" size={15} />
+                                            : <Check size={15} />}
+                                        <span aria-live="polite">{loadingWikiPreview
+                                            ? "Loading preview..."
+                                            : submittingReview
+                                              ? "Processing..."
+                                              : run.stage === "review_final"
+                                                ? "Approve Design"
+                                                : "Approve Structure"}</span>
                                     </button>
                                 </div>
                                 {wikiApprovalOpen && run.stage === "review_final" && (
@@ -1380,8 +1396,12 @@ export function ChatWorkspace({
                                             <div className="designer-wiki-approval-source"><strong>{sessionId ? `Feature · ${sessionId}` : "Design feature"}</strong><span>Design System · v{wikiVersion} · nguồn Designer hiện tại</span><b>Chờ xác nhận</b></div>
                                             {wikiPreviewError && <p className="designer-wiki-approval-note" role="alert">Không lấy được preview chính xác: {wikiPreviewError}</p>}
                                             {designWikiFiles.length > 0 && <div className="designer-wiki-approval-files">
-                                                <nav aria-label="File Design System sẽ lưu">{designWikiFiles.map((file, index) => <button key={file.path} type="button" className={wikiPreviewIndex === index ? "is-active" : ""} onClick={() => setWikiPreviewIndex(index)}><strong>{file.path}</strong><span>{file.summary}</span></button>)}</nav>
-                                                <section className="designer-wiki-approval-preview"><strong>{designWikiFiles[wikiPreviewIndex]?.path}</strong><pre>{designWikiFiles[wikiPreviewIndex]?.content}</pre></section>
+                                                <nav aria-label="File Design System sẽ lưu">{designWikiFiles.map((file, index) => <button key={file.path} type="button" className={wikiPreviewIndex === index ? "is-active" : ""} onClick={() => setWikiPreviewIndex(index)}><strong>{file.path}</strong><span>{file.path.endsWith(".css") ? "Compiled CSS for the selected UI sample" : file.path.endsWith(".jpg") ? "Preview image of the selected UI sample" : file.path.endsWith(".html") ? "Shared HTML template from the selected UI sample" : file.summary}</span></button>)}</nav>
+                                                <section className="designer-wiki-approval-preview"><strong>{designWikiFiles[wikiPreviewIndex]?.path}</strong>
+                                                    {designWikiFiles[wikiPreviewIndex]?.path.endsWith(".jpg") ? (
+                                                        <img src={`data:${designWikiFiles[wikiPreviewIndex]?.mime_type || "image/jpeg"};base64,${designWikiFiles[wikiPreviewIndex]?.content || ""}`} alt="UI sample" />
+                                                    ) : <pre>{designWikiFiles[wikiPreviewIndex]?.content}</pre>}
+                                                </section>
                                             </div>}
                                             <div className="designer-wiki-approval-meta">project_id · version · status · approved_by · source_feature · applies_to</div>
                                             <p className="designer-wiki-approval-note">Khi xác nhận, contract JSON, Markdown, template HTML và asset manifest được lưu theo version; Basic Memory lập chỉ mục Markdown sau đó.</p>

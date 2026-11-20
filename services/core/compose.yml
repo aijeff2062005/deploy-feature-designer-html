@@ -11,11 +11,18 @@ services:
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
+      BASIC_MEMORY_MCP_URL: http://basic-memory:8000/mcp
+      BASIC_MEMORY_PROJECT_ROOT: /app/data
     volumes:
       - platform-storage:/data/storage   # Assets downloads (S3 cache)
       - ../../logs:/logs                 # platform/logs/core-api/
+    networks:
+      - wiki-index
+      - default
     depends_on:
       postgres:
+        condition: service_healthy
+      basic-memory:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/api/core/health')"]

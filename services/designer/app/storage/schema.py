@@ -98,7 +98,7 @@ CREATE INDEX IF NOT EXISTS idx_ds_snippets_component ON design_system_snippets(d
 CREATE TABLE IF NOT EXISTS project_design_wiki (
   project_id TEXT PRIMARY KEY,
   version INTEGER NOT NULL DEFAULT 1,
-  baseline_json TEXT NOT NULL,
+  baseline_json TEXT,
   markdown_key TEXT,
   source_session_id TEXT NOT NULL,
   source_feature_id TEXT,
@@ -107,7 +107,7 @@ CREATE TABLE IF NOT EXISTS project_design_wiki (
 CREATE TABLE IF NOT EXISTS project_design_wiki_versions (
   project_id TEXT NOT NULL,
   version INTEGER NOT NULL,
-  baseline_json TEXT NOT NULL,
+  baseline_json TEXT,
   markdown_key TEXT NOT NULL,
   source_session_id TEXT NOT NULL,
   source_feature_id TEXT,
@@ -118,6 +118,8 @@ CREATE TABLE IF NOT EXISTS project_design_wiki_versions (
 
 AFTER = (
     "ALTER TABLE project_design_wiki ADD COLUMN IF NOT EXISTS markdown_key TEXT",
+    "ALTER TABLE project_design_wiki ALTER COLUMN baseline_json DROP NOT NULL",
+    "ALTER TABLE project_design_wiki_versions ALTER COLUMN baseline_json DROP NOT NULL",
     """INSERT INTO project_design_wiki_versions
        (project_id, version, baseline_json, markdown_key, source_session_id, source_feature_id, updated_at)
        SELECT project_id, version, baseline_json, markdown_key, source_session_id, source_feature_id, updated_at

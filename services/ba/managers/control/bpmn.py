@@ -58,7 +58,15 @@ def _heading_section(content: str, heading: str) -> str | None:
     lines = content.splitlines()
     start = None
     # Accept ordered headings while keeping each parsed section isolated.
-    pattern = re.compile(rf"^#{{1,3}}\s*(?:\d+[.)]?\s*)?{re.escape(heading)}\b", re.IGNORECASE)
+    heading_name = re.escape(heading)
+    if heading.casefold() == "end states":
+        # Accept both "## End States" and the common full title
+        # "## Workflow End States" (optionally preceded by a section number).
+        heading_name = rf"(?:Workflow\s+)?{heading_name}"
+    pattern = re.compile(
+        rf"^#{{1,3}}\s*(?:\d+[.)]?\s*)?{heading_name}\b",
+        re.IGNORECASE,
+    )
     for i, raw in enumerate(lines):
         if pattern.match(raw.strip()):
             start = i + 1
@@ -226,6 +234,10 @@ def parse_workflow_steps(workflow_md: str) -> dict[str, Any]:
     for line_index, raw in enumerate(end_lines):
         line = raw.strip()
         if not line:
+            continue
+        # A horizontal rule may close the End States table before the next
+        # heading. It is presentation syntax, not an additional state label.
+        if re.fullmatch(r"(?:[-*_]\s*){3,}", line):
             continue
         if line.startswith("|"):
             cells = _table_cells(line)

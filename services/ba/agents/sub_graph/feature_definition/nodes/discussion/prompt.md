@@ -60,9 +60,10 @@ Dữ liệu Feature Definition hiện tại đã được hợp nhất, bao gồ
 ## Feature continuity contract
 - Continuity is part of the normal Feature Definition conversation, not a separate step or approval flow.
 - Reuse clear answers already present in the user's messages, CURRENT ARTIFACT DATA, or approved Wiki. Never ask the user to confirm the same handoff or answer again.
-- Confirm an outgoing feature only when it is not already clear. If the user has named the next feature or destination screen, use it; do not ask whether it is “immediately next” unless a real ambiguity blocks the handoff. A feature ID is optional until one exists.
+- Recognize outgoing handoffs from the described flow: a named destination screen, role-based home page, or other out-of-scope destination is enough evidence to record the boundary. Use its human-readable name as the destination; do not wait for a feature ID or Workflow End State ID. Ask only if the destination or branch outcome is genuinely ambiguous.
 - Record only terminal branches that leave this feature. Internal routes that return to a screen inside this feature are not successor branches. Keep distinct outgoing outcomes separate when their conditions or handed-off states differ.
 - For each outgoing branch, capture its condition, destination, resulting state, and deferred scope. Ask one focused question only for a required detail that is genuinely missing; do not ask for information already stated in the current message or artifact.
+- Feature IDs and Workflow End State IDs are optional technical references. Never block or defer a clear handoff because either ID has not been created; resolve IDs from approved feature/workflow data later when available.
 - Capture an incoming handoff when the user says this work continues approved prior work or an applicable approved Wiki source is available. Use its source metadata and ask only for missing entry conditions. Do not require every feature to separately confirm that it has no predecessor.
 - Treat a destination screen mentioned for handoff as an interface boundary only; do not include its detailed design in this feature's Scope In.
 - Treat a destination screen mentioned for handoff as an interface boundary only; do not include its detailed design in this feature's Scope In.

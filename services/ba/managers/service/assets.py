@@ -22,11 +22,19 @@ from managers.database.models import BaPackageModel
 logger = logging.getLogger(__name__)
 
 
-def feature_markdown_path(project_id: str, title: str, feature_id: str, files=None) -> str:
-    """Return a readable, stable project Wiki path for a BA feature page."""
+def _project_file_wiki():
+    """Load the shared Wiki file store after adding its package root to sys.path."""
+    from factory_wiki.paths import ensure_mvp_importable
+
+    ensure_mvp_importable()
     from wiki.project_files import ProjectFileWiki
 
-    files = files or ProjectFileWiki()
+    return ProjectFileWiki()
+
+
+def feature_markdown_path(project_id: str, title: str, feature_id: str, files=None) -> str:
+    """Return a readable, stable project Wiki path for a BA feature page."""
+    files = files or _project_file_wiki()
     normalized = unicodedata.normalize("NFKD", str(title or ""))
     ascii_title = normalized.encode("ascii", "ignore").decode("ascii")
     slug = re.sub(r"[^A-Za-z0-9]+", "-", ascii_title).strip("-").title() or "Feature"
@@ -98,9 +106,8 @@ def build_project_readme(project_id: str, feature_id: str, title: str, descripti
     """Build README content from the Wiki template and approved feature data."""
     import psycopg
     from platform_core.db import database_url
-    from wiki.project_files import ProjectFileWiki
 
-    files = ProjectFileWiki()
+    files = _project_file_wiki()
     with psycopg.connect(database_url("core", "libpq")) as conn:
         project = conn.execute(
             "SELECT name, description FROM core.projects WHERE id = %s", (project_id,),
@@ -108,8 +115,15 @@ def build_project_readme(project_id: str, feature_id: str, title: str, descripti
     project_name = str(project[0] if project else project_id)
     user_description = str((project[1] if project else "") or "").strip()
     exists = files.exists(project_id, "README.md")
-    current_metadata = files.read_metadata(project_id, "README.md") if exists else {}
-    current_text = files.read(project_id, "README.md").decode("utf-8") if exists else ""
+    current_metadata: dict[str, Any] = {}
+    current_text = ""
+    if exists:
+        # ProjectFileWiki is the durable source of Markdown. Basic Memory is
+        # its search/index mirror; its synchronous MCP client uses anyio.run(),
+        # which raises when this builder is called from a FastAPI event loop
+        # (for example, the read-only Wiki preview endpoint).
+        current_text = files.read(project_id, "README.md").decode("utf-8")
+        current_metadata, _ = files.parse_markdown(current_text)
     parts = current_text.split("---", 2)
     old_body = parts[2].strip() if len(parts) == 3 else ""
 
@@ -163,7 +177,7 @@ def build_project_readme(project_id: str, feature_id: str, title: str, descripti
     old_version = int(current_metadata.get("version") or 0)
     metadata = {
         "title": project_name, "type": "project_readme", "project_id": project_id,
-        "version": str(old_version + 1), "status": "approved",
+        "namespace": "project", "version": str(old_version + 1), "status": "approved",
         "project_description": project_description,
         "project_description_source": description_source,
         "source_feature_id": feature_id, "source_artifact_id": source_artifact_id,
@@ -239,10 +253,7 @@ def _publish_project_wiki(
 ) -> None:
     """Mirror only validated/exported BA packages into the project knowledge files."""
     try:
-        from wiki.basic_memory import BasicMemoryClient
-        from wiki.project_files import ProjectFileWiki
-
-        files = ProjectFileWiki()
+        files = _project_file_wiki()
         payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else envelope
         feature_id = str(envelope.get("feature_id") or payload.get("feature_id") or session_id)
         safe_id = re.sub(r"[^A-Za-z0-9_-]", "-", feature_id).strip("-")[:100] or "feature"
@@ -259,46 +270,35 @@ def _publish_project_wiki(
             "published_by": created_by,
             "published_at": published_at,
         }
-        json_path = f"Features/{feature_stem}.v{version:04d}.json"
-        files.write_json(project_id, json_path, {
-            "schema_version": "1.0", "project_id": project_id,
-            "feature_id": feature_id, "version": version, "status": "approved",
-            "published_by": created_by, "published_at": published_at,
-            "source_artifact_id": artifact.get("id"), "source_storage_key": artifact.get("storage_key"),
-            "package": envelope,
-        })
-        files.write_json(project_id, f"Features/{feature_stem}.json", {
-            "schema_version": "1.0", "project_id": project_id,
-            "feature_id": feature_id, "version": version, "status": "approved",
-            "published_by": created_by, "published_at": published_at,
-            "source_artifact_id": artifact.get("id"), "source_storage_key": artifact.get("storage_key"),
-            "package": envelope,
-        })
         section_data = sections or {}
         body = build_ba_feature_body(
             title, str(payload.get("feature_description") or ""), feature_id, version,
             str(artifact.get("id") or ""), str(artifact.get("storage_key") or ""), section_data,
             package_payload=payload,
         )
-        files.write_markdown(project_id, feature_path, title=title,
-                             document_type="ba_feature", version=str(version), status="approved",
-                             body=body, metadata=metadata)
+        feature_markdown = files._yaml({
+            "title": title, "type": "ba_feature", "project_id": project_id, "namespace": "project",
+            "version": str(version), "status": "approved", **metadata,
+        }) + body.rstrip() + "\n"
         files.write_markdown(project_id, f"history/Features/{feature_stem}/v{version:04d}.md",
                              title=title, document_type="ba_feature", version=str(version),
                              status="approved", body=body, metadata=metadata)
+        files.write_basic_memory_note(project_id, feature_path, feature_markdown)
         readme = build_project_readme(
             project_id, safe_id, title, str(payload.get("feature_description") or ""),
             str(artifact.get("id") or ""), version, created_by, section_data, project_description_override,
         )
-        files.storage.put(files.key(project_id, "README.md"), readme.encode("utf-8"),
-                          content_type="text/markdown; charset=utf-8")
+        readme_metadata, readme_body = files.parse_markdown(readme)
+        files.write_markdown(
+            project_id, f"history/README/{safe_id}/v{version:04d}.md", title=str(readme_metadata.get("title") or safe_id),
+            document_type="project_readme", version=str(version), status="approved",
+            body=readme_body,
+            metadata={"source_feature_id": feature_id, "source_artifact_id": str(artifact.get("id") or "")},
+        )
+        files.write_basic_memory_note(project_id, "README.md", readme)
     except Exception:  # noqa: BLE001 - Assets/export are authoritative; Wiki indexing can be retried.
         logger.exception("Could not sync validated BA package %s to Project Wiki", session_id)
         raise
-    try:
-        BasicMemoryClient().ensure_project(project_id, files.markdown_root(project_id))
-    except Exception:  # noqa: BLE001 - Markdown is saved; Basic Memory indexing can be retried.
-        logger.exception("Basic Memory indexing is pending for BA feature %s", session_id)
 
 
 def _publish_bpmn(

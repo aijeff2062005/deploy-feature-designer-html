@@ -105,19 +105,35 @@ async def wf_merge_callback(
         parsed_ids = parse_workflow_steps(wf.get("workflow_md_content") or "").get(
             "end_state_ids", []
         )
-        for mapping in parsed.handoff_mappings:
-            index = mapping.handoff_index - 1
-            requested_id = mapping.workflow_end_state_id.strip()
-            matches = [
-                state_id for state_id in parsed_ids
-                if str(state_id).strip().casefold() == requested_id.casefold()
-            ]
-            if index >= len(handoffs) or len(matches) != 1:
-                continue
-            canonical_id = str(matches[0]).strip()
-            if handoffs[index].get("workflow_end_state_id") != canonical_id:
-                handoffs[index]["workflow_end_state_id"] = canonical_id
-                mapping_changed = True
+        mappings = list(parsed.handoff_mappings)
+        indexes = [mapping.handoff_index for mapping in mappings]
+        requested_ids = [mapping.workflow_end_state_id.strip().casefold() for mapping in mappings]
+        mappings_are_complete_and_unique = (
+            len(mappings) == len(handoffs)
+            and sorted(indexes) == list(range(1, len(handoffs) + 1))
+            and len(requested_ids) == len(set(requested_ids))
+        )
+        resolved_mappings = []
+        if mappings_are_complete_and_unique:
+            for mapping in mappings:
+                index = mapping.handoff_index - 1
+                requested_id = mapping.workflow_end_state_id.strip()
+                matches = [
+                    state_id for state_id in parsed_ids
+                    if str(state_id).strip().casefold() == requested_id.casefold()
+                ]
+                if index >= len(handoffs) or len(matches) != 1:
+                    resolved_mappings = []
+                    break
+                resolved_mappings.append((index, str(matches[0]).strip()))
+
+        # Persist mappings atomically only when they cover every handoff and
+        # resolve one-to-one to unique End State IDs in the saved Markdown.
+        if len(resolved_mappings) == len(handoffs) and handoffs:
+            for index, canonical_id in resolved_mappings:
+                if handoffs[index].get("workflow_end_state_id") != canonical_id:
+                    handoffs[index]["workflow_end_state_id"] = canonical_id
+                    mapping_changed = True
 
         if mapping_changed:
             continuity["handoffs"] = handoffs
@@ -331,8 +347,9 @@ _wf_extractor = LlmAgent(
         "Actors phải khớp FD actors (sẽ thành lanes). "
         "Main Flow ≥3 bước, Exception Flows, End States. "
         "Không lặp lại toàn bộ BR — chỉ tham chiếu BR-XX."
-        "When the user confirms a handoff-to-End-State mapping, return it in handoff_mappings with a 1-based handoff_index and the exact Workflow End State ID. "
-        "Never copy exit_state_id into workflow_end_state_id unless that exact ID exists in Workflow End States. Do not guess ambiguous mappings."
+        "For every confirmed Feature Definition handoff, return one handoff_mappings entry with its 1-based handoff_index and the exact Workflow End State ID. Mappings must be complete and one-to-one: no two handoffs may use the same Workflow End State ID. "
+        "When distinct confirmed branches currently share one broad End State (for example, all roles mapped to Login Success), split that outcome into one role/branch-specific End State per handoff, assign each a unique unused Workflow End State ID, update the complete workflow markdown, and map each handoff to its matching ID. Do this from the existing branch conditions and destinations; do not ask the user to invent technical IDs. "
+        "Never copy exit_state_id into workflow_end_state_id unless that exact ID exists in Workflow End States. Never claim the mapping was saved unless the complete unique handoff_mappings list resolved against IDs in the saved workflow markdown and the deterministic WF-F6 result is PASS."
     ),
     output_schema=WorkflowData,
     before_model_callback=[
@@ -366,10 +383,11 @@ _wf_discussion = LlmAgent(
         "Hỏi làm rõ theo CHECKLIST (ưu tiên required=true). "
         "Không dùng mã flag kỹ thuật (WF-F1…) trong câu trả lời User. "
         "Nhắc OQ/Assumptions nếu có. "
-        "After every Workflow change, read PACKAGE CHANGE REVIEW (deterministic checks) and review all existing workflows, BR references, User Stories, BPMN, and UI Touchpoints. Report concrete findings and affected sections. If failed_checks is non-empty, do not claim the package is okay and do not ask the user to Validate; guide them to fix the listed findings. Only when failed_checks is empty may you say the package is ready for the user to run Validate. Never claim that Validate has already run. "
-        "When FEATURE DEFINITION.continuity.has_successor is true, include an explicit End States table with IDs and describe each distinct terminal branch separately. Every continuity.handoffs record must match exactly one End State; do not collapse branches or invent destinations. Ask the user to resolve missing/mismatched branches before completion. Keep successor detailed screens outside this feature's scope. "
-        "Keep continuity `exit_state_id` (handoff outcome identity) separate from `workflow_end_state_id` (the referenced ID in the Workflow End States). Preserve user-provided End State IDs; never rename them or overwrite `exit_state_id` to force a match. Use an explicit `workflow_end_state_id` mapping when available, and only report WF-F6 from the deterministic package review. "
-        "If the user confirms a handoff-to-End-State mapping, include it in the extractor's `handoff_mappings` output so it is saved into Feature Definition.continuity.handoffs. Only map to an exact ID present in Workflow End States; never claim a Feature Definition mapping was saved unless that structured field was returned and persisted. If the destination is ambiguous, ask the user instead of guessing. "
+        "After every Workflow change, read PACKAGE CHANGE REVIEW (deterministic checks) and review all existing workflows, BR references, User Stories, BPMN, and UI Touchpoints. Treat current artifact data and deterministic checks as the source of truth; prior assistant prose is not proof that a change was saved. Report concrete findings and affected sections. If failed_checks is non-empty, do not claim the package is okay and do not ask the user to Validate; guide them to fix the listed findings. Only when failed_checks is empty may you say the package is ready for the user to run Validate. Never claim that Validate has already run. "
+        "When FEATURE DEFINITION.continuity.has_successor is true, include an explicit End States table with IDs and describe each distinct terminal branch separately. The validator requires a one-to-one mapping: every continuity.handoffs record must map to one End State, and each End State ID may map to only one handoff. If several roles or conditions share a broad success outcome, split it into separate End State rows with unique IDs. Generate unused technical IDs from the workflow itself; do not ask the user to provide IDs when branch conditions/destinations are clear. Keep successor detailed screens outside this feature's scope. "
+        "Keep continuity `exit_state_id` (handoff outcome identity) separate from `workflow_end_state_id` (the referenced ID in the Workflow End States). Preserve user-provided End State IDs; never rename them or overwrite `exit_state_id` to force a match. The extractor must return the full one-to-one `handoff_mappings` list; mappings are saved atomically only if every index is present, every target ID is unique, and each exact ID exists once in the saved Markdown. Only report WF-F6 from the deterministic package review. "
+        "When the existing workflow lacks distinct End States for clearly distinct handoff branches, update the workflow and mapping together; do not leave a many-to-one mapping or tell the user to enter codes. If a destination or branch condition is genuinely ambiguous, ask about that business meaning, not a technical ID. Never claim a mapping or BR reference was saved unless it appears in CURRENT WORKFLOW and the deterministic review confirms the result. "
+        "Before finalizing, ensure every Business Rule ID in BUSINESS RULES appears in the saved workflow markdown, including cross-cutting rules such as security. Reference each rule in the relevant step's BR column; WF-F5 passing for some BR references does not prove V-02 traceability passed for all rules."
         "You have tools: wiki first (`wiki.search_pages` / `wiki.fetch_page`); "
         "do NOT `web_search` for FD scope_out / non-goals / unrelated browsing; "
         "`web_search` only after wiki miss for in-package clarification; "

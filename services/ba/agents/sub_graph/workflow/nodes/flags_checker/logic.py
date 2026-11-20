@@ -153,9 +153,26 @@ def check_wf_flags_logic(ctx) -> dict[str, Any]:
             handoff["workflow_end_state_id"] = state_id
             matched_ids.append(state_id)
         if not handoffs or unmatched or len(matched_ids) != len(set(matched_ids)):
+            duplicate_ids = {
+                state_id for state_id in matched_ids if matched_ids.count(state_id) > 1
+            }
+            duplicate_branches = [
+                str(index)
+                for index, handoff in enumerate(handoffs, start=1)
+                if str(handoff.get("workflow_end_state_id") or "").strip() in duplicate_ids
+            ]
+            detail_parts = []
+            if unmatched:
+                detail_parts.append("chưa khớp End State duy nhất ở nhánh " + ", ".join(unmatched))
+            if duplicate_ids:
+                detail_parts.append(
+                    "mã End State " + ", ".join(sorted(duplicate_ids))
+                    + " đang bị dùng chung ở nhánh " + ", ".join(duplicate_branches)
+                )
             detail = (
-                "Cần một End State có mã, khớp duy nhất cho từng nhánh bàn giao; "
-                "kiểm tra các nhánh: " + (", ".join(unmatched) if unmatched else "mã End State bị dùng lặp") + "."
+                "Mỗi handoff cần một End State có mã riêng; không dùng cùng một mã cho nhiều nhánh. "
+                + ("; ".join(detail_parts) or "Cần một End State có mã khớp duy nhất cho từng nhánh.")
+                + ". Tạo End State nhánh riêng trong Workflow, không cần hỏi người dùng mã kỹ thuật."
             )
             flags["WF-F6"] = flag_dict(
                 6, "End states match handoffs", MISSING_VALUE if not state_ids else FAIL, detail

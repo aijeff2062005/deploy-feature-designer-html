@@ -4,7 +4,8 @@ Write the UI specification and the art direction for the confirmed screens. The 
 Follow the design skill below to decide a distinctive, subject-specific direction. Ground it in the product profile retrieved from the UI/UX knowledge base (a reference, not an order — adapt it to this brief).
 - `mood`: 2 sentences on personality, density and where the one bold move is.
 - `palette`: hex values for primary, primary_foreground, background, foreground, surface, muted, muted_foreground, border, accent, success, warning, destructive. Text on its background ≥ 4.5:1. {{palette_rule}}
-- `heading_font`, `body_font`: Google Fonts families (one family is fine); `radius`, `density`.
+- `heading_font`, `body_font`: Google Fonts families (one family is fine); `density`.
+- `radius` must be exactly one of `none`, `sm`, `md`, `lg`, `xl`, or `2xl`. Do not emit `full`; use `2xl` for the roundest supported design direction. Individual pill buttons and circular avatars can still use fully rounded component styling in their screen markup.
 - `do` / `dont`: up to 6 concrete rules each, specific to this product.
 
 Product profile:

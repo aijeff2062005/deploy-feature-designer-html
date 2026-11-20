@@ -12,7 +12,7 @@ class FeatureHandoffData(BaseModel):
 
     branch_condition: str | None = Field(None, description="Confirmed condition that selects this terminal branch.")
     successor_feature_id: str | None = Field(None, description="Known downstream feature ID, if created.")
-    successor_feature_title: str | None = Field(None, description="User-confirmed downstream feature title.")
+    successor_feature_title: str | None = Field(None, description="Human-readable downstream feature or destination screen title; an ID is optional.")
     exit_state_id: str | None = Field(None, description="Stable identifier for this continuity outcome.")
     workflow_end_state_id: str | None = Field(None, description="Matching End State ID in the approved workflow artifact.")
     exit_state: str | None = Field(None, description="Confirmed outcome and state handed off by this branch.")

@@ -287,6 +287,34 @@ def demote_wiki_page(
         svc.close()
 
 
+@router.post("/pages/{page_id}/revisions/{revision_id}/restore")
+def restore_wiki_revision(
+    page_id: str,
+    revision_id: str,
+    actor: str = Form("ba.lead", description="Human actor id for audit"),
+    project_id: str = Form(..., description="Required project_id"),
+):
+    """Restore a shared-storage snapshot by creating a new proposed revision."""
+    if not (project_id or "").strip():
+        raise HTTPException(status_code=400, detail={"code": "COMMON_SCHEMA_INVALID", "message": "project_id is required"})
+    svc = _wiki_service()
+    try:
+        ensure_mvp_importable()
+        from wiki.models import WikiError
+
+        _check_page_write(svc, page_id, project_id.strip())
+        who = human_actor(project_id.strip()).model_copy(
+            update={"actor": current_username(default=actor) or "ba.lead", "actor_type": "human"},
+        )
+        try:
+            page = svc.restore_revision(who, page_id, revision_id)
+        except WikiError as exc:
+            _raise_wiki(exc)
+        return {"ok": True, "restored_from_revision": revision_id, **_page_row(page)}
+    finally:
+        svc.close()
+
+
 @router.post("/pages/{page_id}/delete")
 def delete_wiki_page(
     page_id: str,

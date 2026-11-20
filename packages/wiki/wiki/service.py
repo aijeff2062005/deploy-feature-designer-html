@@ -3,10 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from wiki.audit import log_audit
@@ -199,6 +200,23 @@ class WikiService:
 
         markdown, page_map = extract_pdf(blob, filename)
         ingested_at = _now()
+        markdown_extract: str | None = markdown
+        if namespace == "project" and project_id and os.getenv("BASIC_MEMORY_MCP_URL", "").strip():
+            from wiki.project_files import ProjectFileWiki
+
+            files = ProjectFileWiki()
+            source_note_path = f"sources/{source_id}.md"
+            source_metadata = {
+                "source_id": source_id, "filename": filename, "sha256": digest,
+                "project_id": project_id, "namespace": "project", "version": "1",
+                "status": "approved", "type": "source_extraction", "ingested_at": ingested_at,
+                "ingested_by": actor.actor,
+            }
+            source_note = files._yaml(source_metadata) + markdown.rstrip() + "\n"
+            files.write_basic_memory_note(project_id, source_note_path, source_note)
+            snapshot_key = files.key(project_id, f"history/sources/{source_id}.md")
+            files.storage.put(snapshot_key, source_note.encode("utf-8"), content_type="text/markdown; charset=utf-8")
+            markdown_extract = None
         self.conn.execute(
             """
             INSERT INTO wiki_source (
@@ -213,7 +231,7 @@ class WikiService:
                 namespace,
                 project_id,
                 storage_key,
-                markdown,
+                markdown_extract,
                 json.dumps(page_map),
                 ingested_at,
                 actor.actor,
@@ -290,6 +308,35 @@ class WikiService:
         if actor.actor_type == "agent" and src.namespace == "project":
             if actor.project_id != src.project_id:
                 raise WikiError("COMMON_PERMISSION_DENIED", "agent cannot read another project", 403)
+        if src.markdown_extract is None:
+            if src.namespace != "project" or not src.project_id:
+                raise WikiError("COMMON_PRECONDITION_FAILED", "source extraction is missing from metadata", 409)
+            from wiki.basic_memory import BasicMemoryClient
+            from wiki.project_files import ProjectFileWiki
+
+            files = ProjectFileWiki()
+            try:
+                note = BasicMemoryClient().read_note(
+                    src.project_id, files.markdown_root(src.project_id), f"sources/{src.source_id}.md",
+                )
+                content = note.get("content", note.get("markdown", ""))
+                if not isinstance(content, str) or not content:
+                    raise ValueError("Basic Memory returned no source Markdown")
+                metadata, markdown = files.parse_markdown(content)
+                if metadata.get("project_id") != src.project_id or metadata.get("source_id") != src.source_id:
+                    raise ValueError("Basic Memory source metadata does not match PostgreSQL")
+                src.markdown_extract = markdown
+            except Exception as error:
+                try:
+                    from platform_core.storage import get_storage
+
+                    snapshot = get_storage().get(files.key(src.project_id, f"history/sources/{src.source_id}.md")).decode("utf-8")
+                    metadata, markdown = files.parse_markdown(snapshot)
+                    if metadata.get("project_id") != src.project_id or metadata.get("source_id") != src.source_id:
+                        raise ValueError("snapshot metadata does not match source")
+                    src.markdown_extract = markdown
+                except Exception as recovery_error:
+                    raise WikiError("COMMON_REFERENCE_NOT_FOUND", f"source Markdown unavailable: {error}; recovery copy unavailable: {recovery_error}", 404) from recovery_error
         log_audit(self.root, operation="wiki.read_source", actor=actor, extra={"source_id": source_id})
         return src
 
@@ -325,8 +372,8 @@ class WikiService:
             page.version = f"{major}.{minor + 1}.0"
             page.status = "proposed"
         self._upsert_page(page, actor.actor, create_revision=True)
-        self.conn.commit()
         self._write_project_file(page, actor.actor)
+        self.conn.commit()
         log_audit(
             self.root,
             operation="wiki.propose_page",
@@ -334,6 +381,52 @@ class WikiService:
             extra={"page_id": page.page_id, "status": page.status},
         )
         return self.fetch_page(actor, page.page_id, page.version, as_propose_followup=True)
+
+    def restore_revision(self, actor: Actor, page_id: str, revision_id: str) -> WikiPage:
+        """Restore an immutable Project Wiki snapshot as a new proposed revision."""
+        require_tool(self.root, actor, "wiki.propose_page")
+        page_row = self.conn.execute("SELECT * FROM wiki_page WHERE page_id = ?", (page_id,)).fetchone()
+        revision = self.conn.execute(
+            "SELECT * FROM wiki_revision WHERE revision_id = ? AND page_id = ?", (revision_id, page_id),
+        ).fetchone()
+        if not page_row or not revision:
+            raise WikiError("COMMON_REFERENCE_NOT_FOUND", "page or revision not found", 404)
+        page_data = row_to_dict(page_row)
+        if page_data["namespace"] != "project" or not page_data.get("project_id"):
+            raise WikiError("COMMON_PRECONDITION_FAILED", "only project Wiki revisions can be restored", 409)
+        require_project_scope(actor, namespace="project", project_id=page_data["project_id"])
+        body = revision["body_snapshot"] or ""
+        if not body:
+            ref = revision["diff_ref"]
+            if not ref:
+                raise WikiError("COMMON_REFERENCE_NOT_FOUND", "revision has no recovery snapshot", 404)
+            try:
+                from platform_core.storage import get_storage
+                from wiki.project_files import ProjectFileWiki
+
+                content = get_storage().get(str(ref)).decode("utf-8")
+                metadata, body = ProjectFileWiki.parse_markdown(content)
+                if metadata.get("project_id") != page_data["project_id"] or metadata.get("page_id") != page_id:
+                    raise ValueError("snapshot metadata does not match requested page")
+                heading = f"# {page_data['title']}"
+                if body.startswith(heading):
+                    body = body[len(heading):].lstrip()
+                footer = f"Source Wiki page: `{page_id}`."
+                if body.rstrip().endswith(footer):
+                    body = body.rstrip()[:-len(footer)].rstrip()
+            except Exception as error:
+                raise WikiError("COMMON_REFERENCE_NOT_FOUND", f"recovery snapshot unavailable: {error}", 404) from error
+        major, minor, _patch = _parse_semver(str(page_data["version"]))
+        payload = ProposePageIn(
+            namespace="project", project_id=page_data["project_id"], bucket_id=page_data["bucket_id"],
+            title=page_data["title"], abbrev=page_data.get("abbrev"), expansion=page_data.get("expansion"),
+            disambiguation=page_data.get("disambiguation"), body=body,
+            source_ids=page_data.get("source_ids", []), owner=actor.actor, version=f"{major}.{minor + 1}.0",
+        )
+        restored = self.propose_page(actor, payload.model_copy(update={"page_id": page_id}))
+        log_audit(self.root, operation="wiki.restore_revision", actor=actor,
+                  extra={"page_id": page_id, "revision_id": revision_id, "new_version": restored.version})
+        return restored
 
     def search_pages(self, actor: Actor, q: SearchQuery) -> list[SearchHit]:
         require_tool(self.root, actor, "wiki.search_pages")
@@ -362,17 +455,53 @@ class WikiService:
             sql.append("AND status = ?")
             args.append(status)
         if q.query:
-            sql.append("AND (title LIKE ? OR body LIKE ? OR ifnull(abbrev,'') LIKE ? OR ifnull(expansion,'') LIKE ?)")
+            if q.namespace == "project":
+                sql.append("AND (title LIKE ? OR ifnull(abbrev,'') LIKE ? OR ifnull(expansion,'') LIKE ?)")
+            else:
+                sql.append("AND (title LIKE ? OR body LIKE ? OR ifnull(abbrev,'') LIKE ? OR ifnull(expansion,'') LIKE ?)")
             like = f"%{q.query}%"
-            args.extend([like, like, like, like])
+            args.extend([like, like, like] if q.namespace == "project" else [like, like, like, like])
 
         sql.append("LIMIT ?")
         args.append(max(1, min(q.limit, 50)))
         rows = self.conn.execute(" ".join(sql), args).fetchall()
         hits: list[SearchHit] = []
+        if q.namespace == "project" and q.project_id and q.query and status == "approved":
+            try:
+                from wiki.basic_memory import BasicMemoryClient
+                from wiki.project_files import ProjectFileWiki
+
+                files = ProjectFileWiki()
+                for item in BasicMemoryClient().search(
+                    q.project_id, files.markdown_root(q.project_id), q.query,
+                    max(q.limit * 3, 10), status="approved",
+                ):
+                    path = str(item.get("file_path") or item.get("path") or item.get("identifier") or "")
+                    parts = PurePosixPath(path.replace("\\", "/")).parts
+                    if "pages" not in parts or parts.index("pages") + 1 >= len(parts):
+                        continue
+                    page_id = PurePosixPath(parts[parts.index("pages") + 1]).stem
+                    row = self.conn.execute(
+                        "SELECT page_id, title, version, bucket_id FROM wiki_page "
+                        "WHERE page_id = ? AND namespace = ? AND project_id = ? AND status = ?",
+                        (page_id, "project", q.project_id, "approved"),
+                    ).fetchone()
+                    if not row or (q.bucket_id and row["bucket_id"] != q.bucket_id):
+                        continue
+                    excerpt = str(item.get("snippet") or item.get("excerpt") or "")
+                    hits.append(SearchHit(
+                        page_id=row["page_id"], title=row["title"], snippet=excerpt[:240],
+                        version=row["version"], bucket_id=row["bucket_id"],
+                        score=float(item.get("score") or 0.7),
+                    ))
+            except Exception:
+                logger.exception("Basic Memory Project Wiki search failed; using metadata-only search")
         needle = (q.query or "").lower()
+        bm_page_ids = {hit.page_id for hit in hits}
         for row in rows:
-            body = row["body"]
+            if row["page_id"] in bm_page_ids:
+                continue
+            body = row["body"] or ""
             snippet = body[:160] + ("..." if len(body) > 160 else "")
             score = 0.5
             if needle and needle in (row["title"] or "").lower():
@@ -412,22 +541,25 @@ class WikiService:
         ).fetchone()
         if not row:
             raise WikiError("COMMON_REFERENCE_NOT_FOUND", f"unknown page_id {page_id}", 404)
-        page = WikiPage(**row_to_dict(row))
-        require_project_scope(actor, namespace=page.namespace, project_id=page.project_id)
-        if actor.actor_type == "agent" and page.namespace == "project":
-            if actor.project_id != page.project_id:
+        page_data = row_to_dict(row)
+        require_project_scope(actor, namespace=page_data["namespace"], project_id=page_data.get("project_id"))
+        if actor.actor_type == "agent" and page_data["namespace"] == "project":
+            if actor.project_id != page_data.get("project_id"):
                 raise WikiError(
                     "COMMON_PERMISSION_DENIED",
                     "agent cannot fetch another project_id",
                     403,
                 )
-            if not as_propose_followup and page.status != "approved":
+            if not as_propose_followup and page_data["status"] != "approved":
                 raise WikiError(
                     "COMMON_PRECONDITION_FAILED",
                     "agent may fetch only approved pages",
                     412,
                 )
-        if version and version != page.version:
+        resolved_version = page_data["version"]
+        resolved_status = page_data["status"]
+        body = page_data.get("body") or ""
+        if version and version != resolved_version:
             rev = self.conn.execute(
                 "SELECT * FROM wiki_revision WHERE page_id = ? AND version = ? ORDER BY created_at DESC",
                 (page_id, version),
@@ -438,9 +570,53 @@ class WikiService:
                     f"unknown version {version} for {page_id}",
                     404,
                 )
-            page.body = rev["body_snapshot"]
-            page.version = rev["version"]
-            page.status = rev["status"]
+            resolved_version = rev["version"]
+            resolved_status = rev["status"]
+            body = rev["body_snapshot"] or ""
+            if not body and page_data["namespace"] == "project":
+                safe_id = re.sub(r"[^A-Za-z0-9_-]", "-", str(page_id)).strip("-")[:100] or "page"
+                try:
+                    from platform_core.storage import get_storage
+                    from wiki.project_files import ProjectFileWiki
+
+                    snapshot_key = rev.get("diff_ref") or ProjectFileWiki().key(
+                        str(page_data["project_id"]), f"history/pages/{safe_id}/v{resolved_version}.md",
+                    )
+                    content = get_storage().get(snapshot_key).decode("utf-8")
+                    metadata, body = ProjectFileWiki.parse_markdown(content)
+                    if (metadata.get("project_id") != page_data["project_id"]
+                            or metadata.get("page_id") != page_id
+                            or str(metadata.get("version")) != str(resolved_version)):
+                        raise ValueError("Project Wiki snapshot metadata does not match its revision")
+                    heading = f"# {page_data['title']}"
+                    if body.startswith(heading):
+                        body = body[len(heading):].lstrip()
+                    footer = f"Source Wiki page: `{page_id}`."
+                    if body.rstrip().endswith(footer):
+                        body = body.rstrip()[:-len(footer)].rstrip()
+                except Exception as error:
+                    raise WikiError(
+                        "COMMON_REFERENCE_NOT_FOUND",
+                        f"snapshot for {page_id} version {resolved_version} is unavailable: {error}",
+                        404,
+                    ) from error
+        elif page_data["namespace"] == "project":
+            try:
+                body = self._read_project_page_body(
+                    str(page_data["project_id"]), str(page_id), str(page_data["title"]),
+                    version=str(page_data["version"]), status=str(page_data["status"]),
+                )
+            except Exception as error:
+                message = str(error).casefold()
+                legacy_fallback = (
+                    "not_found" in message or "not found" in message
+                    or "basic_memory_mcp_url is not configured" in message
+                )
+                if not body or not legacy_fallback:
+                    raise
+        page = WikiPage(**{
+            **page_data, "body": body, "version": resolved_version, "status": resolved_status,
+        })
         if not as_propose_followup:
             log_audit(
                 self.root,
@@ -450,6 +626,37 @@ class WikiService:
             )
         return page
 
+    @staticmethod
+    def _read_project_page_body(
+        project_id: str, page_id: str, title: str, *, version: str | None = None, status: str | None = None,
+    ) -> str:
+        from wiki.basic_memory import BasicMemoryClient
+        from wiki.project_files import ProjectFileWiki
+
+        files = ProjectFileWiki()
+        safe_id = re.sub(r"[^A-Za-z0-9_-]", "-", page_id).strip("-")[:100] or "page"
+        try:
+            note = BasicMemoryClient().read_note(
+                project_id, files.markdown_root(project_id), f"pages/{safe_id}.md",
+            )
+            content = note.get("content", note.get("markdown", ""))
+        except Exception:
+            content = files.read(project_id, f"pages/{safe_id}.md").decode("utf-8")
+        if not isinstance(content, str) or not content:
+            raise ValueError("Basic Memory returned no Markdown content")
+        metadata, body = files.parse_markdown(content)
+        if (metadata.get("project_id") != project_id or metadata.get("page_id") != page_id
+                or (version is not None and str(metadata.get("version")) != version)
+                or (status is not None and str(metadata.get("status")) not in {status, "draft" if status == "proposed" else status})):
+            raise ValueError("Basic Memory page metadata does not match PostgreSQL metadata")
+        heading = f"# {title}"
+        if body.startswith(heading):
+            body = body[len(heading):].lstrip()
+        footer = f"Source Wiki page: `{page_id}`."
+        if body.rstrip().endswith(footer):
+            body = body.rstrip()[:-len(footer)].rstrip()
+        return body
+
     def approve_page(self, actor: Actor, page_id: str, version: str | None = None) -> WikiPage:
         require_tool(self.root, actor, "wiki.approve_page")
         row = self.conn.execute(
@@ -457,7 +664,12 @@ class WikiService:
         ).fetchone()
         if not row:
             raise WikiError("COMMON_REFERENCE_NOT_FOUND", f"unknown page_id {page_id}", 404)
-        page = WikiPage(**row_to_dict(row))
+        page_data = row_to_dict(row)
+        if page_data["namespace"] == "project" and not page_data.get("body"):
+            page_data["body"] = self._read_project_page_body(
+                str(page_data["project_id"]), str(page_data["page_id"]), str(page_data["title"]),
+            )
+        page = WikiPage(**page_data)
         require_project_scope(actor, namespace=page.namespace, project_id=page.project_id)
         if version and version != page.version:
             raise WikiError(
@@ -469,8 +681,8 @@ class WikiService:
         page.status = "approved"
         page.updated_at = now
         self._upsert_page(page, actor.actor, create_revision=True)
-        self.conn.commit()
         self._write_project_file(page, actor.actor)
+        self.conn.commit()
         log_audit(
             self.root,
             operation="wiki.approve_page",
@@ -491,7 +703,12 @@ class WikiService:
         ).fetchone()
         if not row:
             raise WikiError("COMMON_REFERENCE_NOT_FOUND", f"unknown page_id {page_id}", 404)
-        page = WikiPage(**row_to_dict(row))
+        page_data = row_to_dict(row)
+        if page_data["namespace"] == "project" and not page_data.get("body"):
+            page_data["body"] = self._read_project_page_body(
+                str(page_data["project_id"]), str(page_data["page_id"]), str(page_data["title"]),
+            )
+        page = WikiPage(**page_data)
         require_project_scope(actor, namespace=page.namespace, project_id=page.project_id)
         if page.status != "approved":
             raise WikiError(
@@ -503,8 +720,8 @@ class WikiService:
         page.status = "draft"
         page.updated_at = now
         self._upsert_page(page, actor.actor, create_revision=True)
-        self.conn.commit()
         self._write_project_file(page, actor.actor)
+        self.conn.commit()
         log_audit(
             self.root,
             operation="wiki.demote_page",
@@ -514,7 +731,7 @@ class WikiService:
         return page
 
     def _write_project_file(self, page: WikiPage, actor_name: str) -> None:
-        """Mirror project Wiki pages to canonical Markdown after a DB commit."""
+        """Write project Wiki content to Basic Memory and recovery snapshots to shared storage."""
         if page.namespace != "project" or not page.project_id:
             return
         try:
@@ -537,18 +754,67 @@ class WikiService:
                 "approved_by": actor_name if status == "approved" else None,
                 "approved_at": page.updated_at if status == "approved" else None,
             }
-            files.write_markdown(page.project_id, f"pages/{safe_id}.md", title=page.title,
+            path = f"pages/{safe_id}.md"
+            note = files._yaml({
+                "title": page.title, "type": page.bucket_id, "project_id": page.project_id,
+                "version": page.version, "status": status, **metadata,
+            }) + markdown.rstrip() + "\n"
+            revision = self.conn.execute(
+                "SELECT revision_id FROM wiki_revision WHERE page_id = ? AND version = ? "
+                "AND status = ? AND created_at = ? ORDER BY revision_id DESC LIMIT 1",
+                (page.page_id, page.version, page.status, page.updated_at),
+            ).fetchone()
+            revision_id = str(revision["revision_id"]) if revision else "current"
+            revision_path = f"history/pages/{safe_id}/revisions/{revision_id}.md"
+            files.write_markdown(page.project_id, revision_path, title=page.title,
                                  document_type=page.bucket_id, version=page.version,
                                  status=status, body=markdown, metadata=metadata)
+            revision_key = files.key(page.project_id, revision_path)
+            if revision:
+                self.conn.execute(
+                    "UPDATE wiki_revision SET diff_ref = ? WHERE revision_id = ?",
+                    (revision_key, revision_id),
+                )
             if status == "approved":
                 files.write_markdown(page.project_id, f"history/pages/{safe_id}/v{page.version}.md",
                                      title=page.title, document_type=page.bucket_id,
                                      version=page.version, status="approved", body=markdown,
                                      metadata=metadata)
-                from wiki.basic_memory import BasicMemoryClient
-                BasicMemoryClient().ensure_project(page.project_id, files.markdown_root(page.project_id))
+            files.write_basic_memory_note(page.project_id, path, note)
+            self._sync_approved_project_indexes(files, page.project_id)
         except Exception:
             logger.exception("Could not sync project Wiki page %s to Markdown", page.page_id)
+            raise
+
+    def _sync_approved_project_indexes(self, files: Any, project_id: str) -> None:
+        """Publish approved BA knowledge as links in the canonical project Wiki maps."""
+        pages = [item for item in self.list_pages(status="approved", project_id=project_id)
+                 if item.namespace == "project" and item.project_id == project_id]
+        buckets: dict[str, list[dict[str, str]]] = {
+            "POLICY.md": [], "RULES.md": [], "GLOSSARY/TERMS.md": [],
+            "GLOSSARY/ABBREVIATIONS.md": [], "GLOSSARY/DEFINITIONS.md": [], "PROJECT.md": [],
+        }
+        for item in pages:
+            safe_id = re.sub(r"[^A-Za-z0-9_-]", "-", item.page_id).strip("-")[:100] or "page"
+            prefix = "../pages/" if item.bucket_id == "glossary" else "pages/"
+            entry = {"title": item.title, "path": f"{prefix}{safe_id}.md",
+                     "page_id": item.page_id, "version": str(item.version)}
+            if item.bucket_id == "constraint": buckets["POLICY.md"].append(entry)
+            elif item.bucket_id in {"business_rule", "convention"}: buckets["RULES.md"].append(entry)
+            elif item.bucket_id == "glossary":
+                buckets["GLOSSARY/TERMS.md"].append(entry)
+                buckets["GLOSSARY/DEFINITIONS.md"].append(entry)
+                if item.abbrev or item.expansion:
+                    buckets["GLOSSARY/ABBREVIATIONS.md"].append(entry)
+            elif item.bucket_id == "org": buckets["GLOSSARY/DEFINITIONS.md"].append(entry)
+            elif item.bucket_id == "progress": buckets["PROJECT.md"].append(entry)
+        for path, entries in buckets.items():
+            labels = {
+                "POLICY.md": "Project policies", "RULES.md": "Project business rules",
+                "GLOSSARY/TERMS.md": "Project terms", "GLOSSARY/ABBREVIATIONS.md": "Project abbreviations",
+                "GLOSSARY/DEFINITIONS.md": "Project definitions", "PROJECT.md": "Project overview and progress",
+            }
+            files.sync_project_index(project_id, path, entries, title=labels[path])
 
     def delete_page(self, actor: Actor, page_id: str) -> dict[str, Any]:
         """Human-only hard delete of one page (+ revisions). Agents denied."""
@@ -558,8 +824,8 @@ class WikiService:
         ).fetchone()
         if not row:
             raise WikiError("COMMON_REFERENCE_NOT_FOUND", f"unknown page_id {page_id}", 404)
-        page = WikiPage(**row_to_dict(row))
-        require_project_scope(actor, namespace=page.namespace, project_id=page.project_id)
+        page = row_to_dict(row)
+        require_project_scope(actor, namespace=page["namespace"], project_id=page.get("project_id"))
         n = self.delete_pages([page_id])
         log_audit(
             self.root,
@@ -579,7 +845,20 @@ class WikiService:
             sql += " AND project_id = ?"
             args.append(project_id)
         sql += " ORDER BY updated_at DESC"
-        return [WikiPage(**row_to_dict(r)) for r in self.conn.execute(sql, args).fetchall()]
+        pages = []
+        for row in self.conn.execute(sql, args).fetchall():
+            data = row_to_dict(row)
+            if data["namespace"] == "project" and not data.get("body") and data.get("project_id"):
+                try:
+                    data["body"] = self._read_project_page_body(
+                        str(data["project_id"]), str(data["page_id"]), str(data["title"]),
+                        version=str(data["version"]), status=str(data["status"]),
+                    )
+                except Exception:
+                    logger.exception("Could not read Project Wiki page %s from Basic Memory", data["page_id"])
+                    data["body"] = ""
+            pages.append(WikiPage(**data))
+        return pages
 
     def delete_pages(self, page_ids: list[str]) -> int:
         if not page_ids:
@@ -629,7 +908,7 @@ class WikiService:
                 page.disambiguation,
                 page.status,
                 page.version,
-                page.body,
+                page.body if page.namespace != "project" or not os.getenv("BASIC_MEMORY_MCP_URL", "").strip() else None,
                 json.dumps(page.source_ids),
                 page.owner,
                 page.updated_at,
@@ -659,7 +938,7 @@ class WikiService:
                     page.page_id,
                     page.version,
                     page.status,
-                    page.body,
+                    page.body if page.namespace != "project" or not os.getenv("BASIC_MEMORY_MCP_URL", "").strip() else None,
                     None,
                     actor_name,
                     page.updated_at,

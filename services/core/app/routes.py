@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import re
 import uuid
+import os
 from typing import Any
 
 import mimetypes
 import unicodedata
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from platform_core import artifacts
@@ -41,6 +42,11 @@ class LoginIn(BaseModel):
 class ProjectIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=2000)
+    huly_url: str = Field(default="", max_length=1000)
+
+
+class HulyResolveIn(BaseModel):
+    huly_url: str = Field(min_length=1, max_length=1000)
 
 
 class MemberIn(BaseModel):
@@ -175,12 +181,14 @@ def list_projects() -> list[dict[str, Any]]:
     with connection() as conn:
         rows = conn.execute(
             """
-            SELECT p.id, p.name, p.description, p.created_at,
+            SELECT p.id, p.name, p.description, p.huly_url, p.huly_project_id, p.huly_project_name, p.created_at,
+                   COALESCE(w.status, 'not_started') AS wiki_bootstrap_status,
                    array_agg(DISTINCT m.project_role ORDER BY m.project_role) AS my_roles,
                    (SELECT count(DISTINCT user_id) FROM project_members x WHERE x.project_id = p.id) AS member_count
             FROM projects p JOIN project_members m ON m.project_id = p.id AND m.user_id = %s
+            LEFT JOIN project_wiki_bootstrap w ON w.project_id = p.id
             WHERE p.archived_at IS NULL
-            GROUP BY p.id ORDER BY p.name
+            GROUP BY p.id, w.status ORDER BY p.name
             """,
             (user.id,),
         ).fetchall()
@@ -196,18 +204,129 @@ def create_project(body: ProjectIn) -> dict[str, Any]:
     project_id = f"PRJ-{slug}-{uuid.uuid4().hex[:4].upper()}"
     # Default: the creator runs the whole journey (PM = BA + Designer) and administers it.
     roles = ["ADMIN", "PM"]
+    huly_url = body.huly_url.strip()
+    huly_project = None
+    if huly_url:
+        parsed = urlsplit(huly_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise HTTPException(422, detail={"code": "HULY_URL_INVALID", "message": "Huly URL must be an http(s) URL"})
+        huly_project = _resolve_huly_project(huly_url)
     with connection() as conn:
         conn.execute(
-            "INSERT INTO projects (id, name, description, created_by) VALUES (%s, %s, %s, %s)",
-            (project_id, body.name.strip(), body.description.strip(), user.id),
+            "INSERT INTO projects (id, name, description, huly_url, huly_project_id, huly_project_name, created_by) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (project_id, body.name.strip(), body.description.strip(), huly_url,
+             str(huly_project.get("huly_id", "")) if huly_project else "",
+             str(huly_project.get("name", "")) if huly_project else "", user.id),
         )
+        conn.execute("INSERT INTO project_wiki_bootstrap (project_id, status) VALUES (%s, 'pending')", (project_id,))
         for role in roles:
             conn.execute(
                 "INSERT INTO project_members (project_id, user_id, project_role) VALUES (%s, %s, %s)",
                 (project_id, user.id, role),
             )
     clear_cache()
-    return {"id": project_id, "name": body.name.strip(), "description": body.description.strip(), "my_roles": roles}
+    status, error, version = _run_project_wiki_bootstrap(project_id, body.name.strip(), body.description.strip(), huly_url, huly_project)
+    return {"id": project_id, "name": body.name.strip(), "description": body.description.strip(),
+            "huly_url": huly_url, "huly_project_id": (huly_project or {}).get("huly_id", ""),
+            "huly_project_name": (huly_project or {}).get("name", ""), "my_roles": roles, "wiki_bootstrap_status": status,
+            "wiki_bootstrap_error": error, "wiki_template_version": version}
+
+
+def _run_project_wiki_bootstrap(project_id: str, name: str, description: str, huly_url: str, huly_project: dict[str, Any] | None = None) -> tuple[str, str | None, str | None]:
+    try:
+        from wiki.bootstrap import bootstrap_project_wiki
+        result = bootstrap_project_wiki(project_id, name, description, huly_url, huly_project)
+        status, error, version = "ready", None, str(result["template_version"])
+    except Exception as exc:
+        status, error, version = "failed", str(exc)[:2000], None
+    with connection() as conn:
+        conn.execute("UPDATE project_wiki_bootstrap SET status=%s, template_version=%s, error=%s, updated_at=now() WHERE project_id=%s",
+                     (status, version, error, project_id))
+    return status, error, version
+
+
+@private.post("/projects/resolve-huly")
+def resolve_huly_project(body: HulyResolveIn) -> dict[str, str]:
+    return _resolve_huly_project(body.huly_url)
+
+
+def _resolve_huly_project(raw_url: str) -> dict[str, str]:
+    """Resolve only against authenticated Huly project records; never fetch user URLs."""
+    import anyio
+    from urllib.parse import unquote
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+    import httpx2
+
+    parsed = urlsplit(raw_url.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(422, detail={"code": "HULY_URL_INVALID", "message": "Huly URL must be an http(s) URL"})
+    token = os.getenv("MCP_AUTH_TOKEN", "").strip()
+    if not token:
+        raise HTTPException(503, detail={"code": "HULY_NOT_CONFIGURED", "message": "Huly project lookup is not configured"})
+    mcp_url = os.getenv("HULY_MCP_URL", "http://huly-mcp:3001/mcp")
+    workspace = os.getenv("HULY_WORKSPACE", "testing")
+
+    async def fetch_projects():
+        async with httpx2.AsyncClient(headers={"Authorization": f"Bearer {token}"}, timeout=httpx2.Timeout(30.0)) as client:
+            async with streamable_http_client(mcp_url, http_client=client) as streams:
+                read, write = streams[:2]
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    return await session.call_tool("list_projects", arguments={"workspace": workspace})
+    try:
+        result = anyio.run(fetch_projects)
+    except Exception as exc:
+        raise HTTPException(502, detail={"code": "HULY_LOOKUP_FAILED", "message": "Could not read projects from Huly. Check the Huly MCP connection."}) from exc
+    if getattr(result, "is_error", getattr(result, "isError", False)):
+        raise HTTPException(502, detail={"code": "HULY_LOOKUP_FAILED", "message": "Huly could not resolve this project."})
+    data = getattr(result, "structured_content", getattr(result, "structuredContent", None))
+    if data is None:
+        for item in getattr(result, "content", []):
+            text_value = getattr(item, "text", "")
+            if text_value:
+                import json
+                try: data = json.loads(text_value)
+                except json.JSONDecodeError: pass
+                break
+    def entries(value):
+        if isinstance(value, list): return [x for x in value if isinstance(x, dict)]
+        if isinstance(value, dict):
+            for key in ("projects", "items", "results", "data", "result"):
+                if key in value: return entries(value[key])
+            return [value] if any(k in value for k in ("id", "_id", "identifier", "name")) else []
+        return []
+    candidates = [unquote(x).strip() for x in re.split(r"[/?#&=]", parsed.path + " " + parsed.query) if unquote(x).strip()]
+    normalize = lambda s: re.sub(r"[^a-z0-9]", "", s.casefold())
+    matches = []
+    for item in entries(data):
+        pid = str(item.get("id") or item.get("_id") or item.get("projectId") or "").strip()
+        identifier = str(item.get("identifier") or item.get("shortId") or item.get("code") or "").strip()
+        name = str(item.get("name") or item.get("title") or "").strip()
+        values = {normalize(v) for v in (pid, identifier, name) if v}
+        if any(normalize(part) in values for part in candidates):
+            matches.append({"id": identifier or pid, "huly_id": pid or identifier, "identifier": identifier or pid, "name": name or identifier or pid})
+    # Deduplicate aliases pointing to the same Huly record.
+    unique = {item["huly_id"]: item for item in matches}
+    if len(unique) != 1:
+        code, message = ("HULY_PROJECT_NOT_FOUND", "Không tìm thấy project nào trong Huly khớp với URL này.") if not unique else ("HULY_PROJECT_AMBIGUOUS", "URL khớp nhiều project Huly; hãy dùng link có mã project cụ thể.")
+        raise HTTPException(422, detail={"code": code, "message": message})
+    return next(iter(unique.values()))
+
+
+@private.post("/projects/{project_id}/wiki/bootstrap")
+def retry_project_wiki_bootstrap(project_id: str) -> dict[str, Any]:
+    with connection() as conn:
+        _require_member(conn, project_id, get_current_user(), admin=True)
+        row = conn.execute("SELECT id,name,description,huly_url,huly_project_id,huly_project_name FROM projects WHERE id=%s", (project_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, detail={"code": "PROJECT_NOT_FOUND", "message": "Project not found"})
+        conn.execute("INSERT INTO project_wiki_bootstrap (project_id,status) VALUES (%s,'pending') "
+                      "ON CONFLICT (project_id) DO UPDATE SET status='pending',error=NULL,updated_at=now()", (project_id,))
+    linked = {"huly_id": row["huly_project_id"], "name": row["huly_project_name"]} if row["huly_project_id"] else None
+    status, error, version = _run_project_wiki_bootstrap(project_id, row["name"], row["description"], row["huly_url"], linked)
+    return {"project_id": project_id, "wiki_bootstrap_status": status, "wiki_bootstrap_error": error,
+            "wiki_template_version": version}
 
 
 @private.get("/projects/{project_id}")
@@ -215,7 +334,7 @@ def get_project(project_id: str) -> dict[str, Any]:
     user = get_current_user()
     with connection() as conn:
         roles = _require_member(conn, project_id, user)
-        project = conn.execute("SELECT * FROM projects WHERE id=%s", (project_id,)).fetchone()
+        project = conn.execute("SELECT p.*, COALESCE(w.status, 'not_started') AS wiki_bootstrap_status, w.error AS wiki_bootstrap_error FROM projects p LEFT JOIN project_wiki_bootstrap w ON w.project_id=p.id WHERE p.id=%s", (project_id,)).fetchone()
         members = conn.execute(
             """
             SELECT u.id, u.username, u.display_name,
@@ -229,6 +348,11 @@ def get_project(project_id: str) -> dict[str, Any]:
         "id": project["id"],
         "name": project["name"],
         "description": project["description"],
+        "huly_url": project["huly_url"],
+        "huly_project_id": project["huly_project_id"],
+        "huly_project_name": project["huly_project_name"],
+        "wiki_bootstrap_status": project["wiki_bootstrap_status"],
+        "wiki_bootstrap_error": project["wiki_bootstrap_error"],
         "created_at": project["created_at"].isoformat(),
         "my_roles": roles,
         "members": [
@@ -381,15 +505,34 @@ def wiki_source_markdown(project_id: str, source_id: str) -> Response:
     with connection() as conn:
         _require_member(conn, project_id, get_current_user())
         row = conn.execute(
-            "SELECT filename, markdown_extract FROM wiki.wiki_source WHERE source_id = %s "
+            "SELECT filename, namespace, project_id, markdown_extract FROM wiki.wiki_source WHERE source_id = %s "
             "AND ((namespace = 'project' AND project_id = %s) OR namespace = 'company')",
             (source_id, project_id),
         ).fetchone()
     if not row:
         raise HTTPException(404, detail={"code": "FILE_NOT_FOUND", "message": "File not found"})
+    markdown = row["markdown_extract"]
+    if markdown is None:
+        try:
+            from platform_core.storage import get_storage
+            from wiki.basic_memory import BasicMemoryClient
+            from wiki.project_files import ProjectFileWiki
+
+            files = ProjectFileWiki()
+            try:
+                note = BasicMemoryClient().read_note(project_id, files.markdown_root(project_id), f"sources/{source_id}.md")
+                content = note.get("content", note.get("markdown", ""))
+                metadata, markdown = files.parse_markdown(str(content))
+            except Exception:
+                snapshot = get_storage().get(files.key(project_id, f"history/sources/{source_id}.md")).decode("utf-8")
+                metadata, markdown = files.parse_markdown(snapshot)
+            if metadata.get("project_id") != project_id or metadata.get("source_id") != source_id:
+                raise ValueError("source note metadata mismatch")
+        except Exception as exc:
+            raise HTTPException(502, detail={"code": "WIKI_SOURCE_UNAVAILABLE", "message": str(exc)}) from exc
     stem = row["filename"].rsplit(".", 1)[0] or source_id
     return Response(
-        row["markdown_extract"].encode("utf-8"),
+        markdown.encode("utf-8"),
         media_type="text/markdown; charset=utf-8",
         headers={"Content-Disposition": _disposition(f"{stem}.md")},
     )

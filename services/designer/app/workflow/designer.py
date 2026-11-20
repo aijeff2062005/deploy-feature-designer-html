@@ -946,6 +946,41 @@ class HtmlDesigner:
         contract = baseline.get("contract") or {}
         if not isinstance(contract, dict) or contract.get("key") != style_key:
             return None
+        selected_sample = baseline.get("selected_ui_sample") or {}
+        if selected_sample.get("platform") == platform:
+            from wiki.project_files import ProjectFileWiki
+
+            project_files = ProjectFileWiki()
+            try:
+                template_html = project_files.read(session.project_id, str(selected_sample["html_path"])).decode("utf-8")
+                template_css = project_files.read(session.project_id, str(selected_sample["css_path"])).decode("utf-8")
+                sample_image = project_files.read(session.project_id, str(selected_sample["preview_path"]))
+                saved_visual_system = baseline.get("visual_system") or {}
+                saved_platform = (saved_visual_system.get("platforms") or {}).get(platform) or {}
+                style_profile = saved_platform.get("profile") if isinstance(saved_platform.get("profile"), dict) else {}
+                return {
+                    "image": sample_image,
+                    "feature_title": baseline.get("source_feature_title") or session.title,
+                    "screen_name": selected_sample.get("screen_name") or selected_sample.get("name") or "Selected UI sample",
+                    "platform": platform,
+                    "style_name": contract.get("name", ""),
+                    "wiki_version": (wiki or {}).get("version"),
+                    "visual_system_source": "selected_ui_template",
+                    "style_lock_css": template_css,
+                    "style_profile": style_profile,
+                    "template_html": template_html,
+                    "template_css": template_css,
+                }
+            except Exception as error:
+                logger.exception("Could not load the selected Project Wiki UI template for project %s", session.project_id)
+                raise AppError(
+                    "PROJECT_WIKI_TEMPLATE_UNAVAILABLE",
+                    "The approved Project Wiki UI template could not be loaded",
+                    "The saved Design System is missing its selected HTML/CSS/image template. Restore or re-approve the Design System before building this feature.",
+                    502,
+                    True,
+                    action="Retry after restoring the selected Project Wiki UI template.",
+                ) from error
         source_id = (wiki or {}).get("source_session_id")
         if not source_id:
             raise AppError(
@@ -1044,17 +1079,34 @@ class HtmlDesigner:
                 if values:
                     contract_lines.append(f"- Component {role}/{variant}: " + ", ".join(values))
         contract_text = "\n".join(contract_lines) or "- No reusable semantic values were recorded; follow the selected project visual contract."
-        return (
+        has_selected_template = bool(reference.get("template_html"))
+        reference_rule = (
+            "The approved Project Wiki sample is the canonical visual template. Preserve its visual shell, "
+            "spacing, typography, component shapes, surfaces, colors and responsive behavior. Adapt its "
+            "content and controls to this feature's BA requirements."
+            if has_selected_template else
+            "The attached approved screen is visual reference only; do not copy its page structure, labels or "
+            "feature-specific content."
+        )
+        instruction = (
             "\nProject Wiki inheritance: use the approved project visual contract and semantic token/component "
             "roles as the source of truth. Reuse only values recorded without conflicts; a conflict means the "
             "contract does not prescribe that value. Preserve the current feature's BA-defined screen content, "
-            "layout, states, navigation and interactions. The attached approved screen is visual reference only: "
-            "do not copy its page background, decorative artwork, screen structure, labels or feature-specific "
-            "content. Apply shared values to the same semantic component role/variant only; do not style elements "
+            "states, navigation and interactions. " + reference_rule + " Apply shared values to the same semantic component role/variant only; do not style elements "
             "by size, DOM position, class-name guesses, or by being the first/largest control. When the Wiki has "
             "no matching role, follow the selected visual contract consistently and do not invent a Wiki override.\n"
             "Approved Project Wiki values (conflicted values are intentionally omitted):\n" + contract_text
         )
+        template_html = str(reference.get("template_html") or "")
+        template_css = str(reference.get("template_css") or "")
+        if template_html:
+            instruction += (
+                "\nThe attached Project Wiki image and the following saved HTML/CSS are the exact UI sample "
+                "approved for this project. Start from this template and adapt its content and controls to "
+                "the current BA package while preserving its visual design.\nSelected UI sample HTML:\n```html\n" + template_html[:40_000] +
+                "\n```\nSelected UI sample compiled CSS:\n```css\n" + template_css[:40_000] + "\n```"
+            )
+        return instruction
 
     async def _offer_style_previews(
         self, run: RunView, session: SessionView, brief, *,
@@ -1512,7 +1564,10 @@ class HtmlDesigner:
                        "Ba preview giữ nguyên nội dung màn hình này nhưng trình bày theo ba hướng thị giác khác nhau. "
                        "Chọn một hướng để áp dụng cho toàn bộ các màn hình đã chốt.")
         await self._emit(run, "assistant.message", {"intent": "gather", "message": message})
-        public_previews = [{key: value for key, value in item.items() if key not in {"image", "rendered_image", "qa_errors"}}
+        # Keep the exact selected preview recoverable for Project Wiki approval.
+        # The JPEG is the same rendered image shown in the style picker; the raw
+        # HTML/CSS and dimensions are already part of each option payload.
+        public_previews = [{key: value for key, value in item.items() if key != "qa_errors"}
                            for item in previews]
         await self._emit(run, "style.inherited.preview" if inherited_candidate else "style.previews", {
             "screen_id": screen.id, "screen_name": screen.name,

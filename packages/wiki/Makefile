@@ -3,7 +3,7 @@ VENV   := .venv
 BIN    := $(VENV)/bin
 export PYTHONPATH := .
 
-.PHONY: all install seed seed-approve run mcp test clean reset
+.PHONY: all install seed seed-approve run mcp test clean reset migrate-project-wiki migrate-project-wiki-apply
 
 all: install
 	@echo ""
@@ -31,6 +31,12 @@ run: install
 
 mcp: install
 	$(BIN)/python -m wiki.mcp_server
+
+migrate-project-wiki: install
+	$(BIN)/python -m wiki.migrate_project_wiki
+
+migrate-project-wiki-apply: install
+	$(BIN)/python -m wiki.migrate_project_wiki --apply
 
 test: install
 	$(BIN)/pytest -q

@@ -143,7 +143,7 @@ def check_fd_flags_logic(ctx) -> dict[str, Any]:
     if not isinstance(continuity, dict):
         continuity = {}
     if continuity.get("has_successor") not in (True, False):
-        missing.append("xác nhận có feature tiếp nối hay không")
+        missing.append("xác định có điểm bàn giao/đích ngoài feature hay không")
     if continuity.get("has_successor") is True:
         handoffs = continuity.get("handoffs") or []
         if not handoffs and continuity.get("exit_state"):
@@ -161,9 +161,9 @@ def check_fd_flags_logic(ctx) -> dict[str, Any]:
             if not handoff.get("branch_condition"):
                 branch_missing.append("điều kiện nhánh")
             if not (handoff.get("successor_feature_id") or handoff.get("successor_feature_title")):
-                branch_missing.append("feature tiếp nối")
+                branch_missing.append("tên feature hoặc màn hình đích")
             if not handoff.get("exit_state"):
-                branch_missing.append("End State bàn giao")
+                branch_missing.append("kết quả/trạng thái bàn giao (mô tả bằng ngôn ngữ thường)")
             deferred_scope = handoff.get("deferred_scope") or []
             if isinstance(deferred_scope, str):
                 deferred_scope = [deferred_scope]

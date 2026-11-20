@@ -8,11 +8,17 @@ export type ProjectSummary = {
   id: string;
   name: string;
   description: string;
+  huly_url?: string;
+  huly_project_id?: string;
+  huly_project_name?: string;
+  wiki_bootstrap_status?: string;
+  wiki_bootstrap_error?: string | null;
   my_roles: string[];
   member_count: number;
 };
 export type Member = { id: string; username: string; name: string; roles: string[] };
 export type ProjectDetail = ProjectSummary & { members: Member[] };
+export type HulyProjectMatch = { id: string; huly_id: string; identifier: string; name: string };
 
 export type Artifact = {
   id: string;
@@ -121,8 +127,12 @@ export const api = {
   logout: () => call<{ ok: boolean }>("/auth/logout", { method: "POST" }),
   projects: () => call<ProjectSummary[]>("/projects"),
   project: (id: string) => call<ProjectDetail>(`/projects/${encodeURIComponent(id)}`),
-  createProject: (name: string, description: string) =>
-    call<ProjectSummary>("/projects", { method: "POST", body: JSON.stringify({ name, description }) }),
+  createProject: (name: string, description: string, hulyUrl = "") =>
+    call<ProjectSummary>("/projects", { method: "POST", body: JSON.stringify({ name, description, huly_url: hulyUrl }) }),
+  resolveHulyProject: (hulyUrl: string) =>
+    call<HulyProjectMatch>("/projects/resolve-huly", { method: "POST", body: JSON.stringify({ huly_url: hulyUrl }) }),
+  retryProjectWikiBootstrap: (id: string) =>
+    call<{ wiki_bootstrap_status: string; wiki_bootstrap_error: string | null }>(`/projects/${encodeURIComponent(id)}/wiki/bootstrap`, { method: "POST" }),
   users: () => call<User[]>("/users"),
   addMember: (projectId: string, userId: string, role: string) =>
     call(`/projects/${encodeURIComponent(projectId)}/members`, {

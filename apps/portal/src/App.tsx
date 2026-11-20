@@ -226,8 +226,9 @@ export function App() {
           note="Bạn là PM của dự án (làm cả BA và Designer) và có quyền quản trị thành viên."
           submitLabel="Tạo dự án"
           onClose={() => setCreating(false)}
-          onSubmit={async (name, description) => {
-            const created = await api.createProject(name, description);
+          includeHulyUrl
+          onSubmit={async (name, description, hulyUrl) => {
+            const created = await api.createProject(name, description, hulyUrl);
             setCreating(false);
             loadProjects();
             navigate(`/projects/${enc(created.id)}`);
@@ -559,20 +560,53 @@ function CreateDialog(props: {
   note: string;
   submitLabel: string;
   nameLabel?: string;
+  includeHulyUrl?: boolean;
   onClose: () => void;
-  onSubmit: (name: string, description: string) => Promise<void>;
+  onSubmit: (name: string, description: string, hulyUrl?: string) => Promise<void>;
 }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [hulyUrl, setHulyUrl] = useState("");
+  const [hulyMatch, setHulyMatch] = useState<{ name: string; id: string } | null>(null);
+  const [hulyState, setHulyState] = useState<"idle" | "loading" | "resolved" | "error">("idle");
+  const [hulyError, setHulyError] = useState("");
+  const [nameEdited, setNameEdited] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!props.includeHulyUrl) return;
+    const value = hulyUrl.trim();
+    setHulyMatch(null);
+    setHulyError("");
+    if (!value) {
+      setHulyState("idle");
+      if (!nameEdited) setName("");
+      return;
+    }
+    let active = true;
+    setHulyState("loading");
+    const timer = window.setTimeout(() => {
+      api.resolveHulyProject(value).then((match) => {
+        if (!active) return;
+        setHulyMatch({ name: match.name, id: match.huly_id });
+        setHulyState("resolved");
+        if (!nameEdited) setName(match.name);
+      }).catch((err) => {
+        if (!active) return;
+        setHulyState("error");
+        setHulyError(err instanceof ApiError ? err.message : "Không tra được project trong Huly");
+      });
+    }, 450);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [hulyUrl, nameEdited, props.includeHulyUrl]);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setBusy(true);
     setError("");
     try {
-      await props.onSubmit(name.trim(), description.trim());
+      await props.onSubmit(name.trim(), description.trim(), hulyUrl.trim());
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Không tạo được");
       setBusy(false);
@@ -580,21 +614,34 @@ function CreateDialog(props: {
   };
 
   return (
-    <Modal title={props.title} onClose={props.onClose}>
+    <Modal title={props.title} onClose={props.onClose} wide={props.includeHulyUrl}>
       <form className="form" onSubmit={submit}>
         <label>
           {props.nameLabel ?? "Tên"}
-          <input value={name} onChange={(e) => setName(e.target.value)} required maxLength={200} autoFocus />
+          <input value={name} onChange={(e) => { setName(e.target.value); setNameEdited(true); }} required maxLength={200} autoFocus placeholder={props.includeHulyUrl ? "Ví dụ: FastGo Mobile" : undefined} />
         </label>
         <label>
           Mô tả
           <textarea value={description} onChange={(e) => setDescription(e.target.value)} maxLength={2000} rows={3} />
         </label>
+        {props.includeHulyUrl && <>
+          <label>Huly project URL <span className="optional-tag">Không bắt buộc</span>
+            <input type="url" value={hulyUrl} onChange={(e) => setHulyUrl(e.target.value)} placeholder="https://huly.example.com/..." maxLength={1000} />
+          </label>
+          <section className="project-wiki-preview" aria-label="Project Wiki sẽ được khởi tạo">
+            <div className="project-wiki-title"><span className="wiki-book"><BookOpen size={20} /></span><div><strong>Project Wiki tự động</strong><small>Một vùng tri thức riêng cho project, dùng chung bởi BA và Designer.</small></div></div>
+            <div className="project-wiki-row"><FileJson size={16} /><strong>Quy định & nghiệp vụ</strong><span>Policy · Rules · Thuật ngữ · Từ viết tắt · Định nghĩa</span></div>
+            <div className="project-wiki-row"><Layers size={16} /><strong>Thiết kế</strong><span>Design system · Templates</span></div>
+            <div className="project-wiki-row"><Workflow size={16} /><strong>Huly project</strong><span className={hulyState === "error" ? "wiki-error" : ""}>{hulyState === "loading" ? "Đang tra cứu…" : hulyMatch ? hulyMatch.name : hulyUrl.trim() ? hulyError : "Chưa liên kết"}</span></div>
+            <p className="wiki-note">Tạo sẵn khung; nội dung có thể bổ sung sau.</p>
+          </section>
+          {hulyState === "error" && <div className="alert">{hulyError}</div>}
+        </>}
         {error && <div className="alert">{error}</div>}
         <p className="muted small">{props.note}</p>
         <div className="dialog-actions">
           <button type="button" className="btn ghost" onClick={props.onClose}>Huỷ</button>
-          <button className="btn primary" disabled={!name.trim() || busy}>
+          <button className="btn primary" disabled={!name.trim() || busy || hulyState === "loading" || (Boolean(hulyUrl.trim()) && hulyState !== "resolved")}>
             {busy ? <span className="spinner sm" /> : props.submitLabel}
           </button>
         </div>
@@ -640,6 +687,7 @@ function ProjectPage({
   const [project, setProject] = useState<ProjectDetail | null>(null);
   const [error, setError] = useState("");
   const [tab, setTab] = useState<Tab>("features");
+  const [bootstrapBusy, setBootstrapBusy] = useState(false);
 
   const load = useCallback(() => {
     api.project(projectId).then(setProject).catch((e) => setError(String(e.message ?? e)));
@@ -662,6 +710,18 @@ function ProjectPage({
             <div className="boot inline"><span className="spinner" /></div>
           ) : (
             <>
+              {project.wiki_bootstrap_status === "failed" && <div className="alert">
+                Project Wiki chưa khởi tạo được: {project.wiki_bootstrap_error || "Basic Memory chưa sẵn sàng."}
+                {project.my_roles.some((role) => ["ADMIN", "PM"].includes(role)) && <button className="btn sm" disabled={bootstrapBusy} onClick={async () => {
+                  setBootstrapBusy(true);
+                  try {
+                    await api.retryProjectWikiBootstrap(project.id);
+                    load();
+                  } finally {
+                    setBootstrapBusy(false);
+                  }
+                }}>{bootstrapBusy ? "Đang thử lại..." : "Thử khởi tạo lại"}</button>}
+              </div>}
               <div className="project-hero" style={{ ["--h" as string]: hue(project.id) }}>
                 <span className="project-mark lg">{project.name.slice(0, 1).toUpperCase()}</span>
                 <div className="project-hero-text">

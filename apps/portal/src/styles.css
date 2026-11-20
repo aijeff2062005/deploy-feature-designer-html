@@ -339,7 +339,19 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--v
 /* ── Dialog ────────────────────────────────────────────── */
 .overlay { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 24px; background: rgba(8, 8, 12, 0.5); backdrop-filter: blur(3px); animation: fade 0.15s ease; }
 .dialog { width: min(480px, 100%); max-height: calc(100vh - 48px); overflow: auto; padding: 22px; border-radius: 18px; background: var(--bg-surface); box-shadow: var(--shadow-lg); animation: pop 0.18s ease; }
-.dialog.wide { width: min(620px, 100%); }
+.dialog.wide { width: min(720px, 100%); }
+.project-wiki-preview { border: 1px solid var(--violet); border-radius: 14px; padding: 12px 14px; background: color-mix(in srgb, var(--violet-soft) 25%, var(--bg-surface)); }
+.project-wiki-title { display: flex; align-items: center; gap: 12px; padding-bottom: 10px; }
+.project-wiki-title > div { display: flex; flex-direction: column; gap: 3px; }
+.project-wiki-title small { color: var(--text-muted); font-size: 12px; }
+.wiki-book { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 11px; background: var(--violet-soft); color: var(--violet); }
+.project-wiki-row { display: grid; grid-template-columns: 22px minmax(130px, 1fr) 1.5fr; align-items: center; gap: 8px; padding: 9px 4px; border-top: 1px solid var(--border-strong); color: var(--text-secondary); font-size: 12px; }
+.project-wiki-row svg { color: var(--text-muted); }
+.project-wiki-row strong { color: var(--text-primary); font-size: 12px; }
+.project-wiki-row span { text-align: right; color: var(--text-muted); overflow-wrap: anywhere; }
+.project-wiki-row .wiki-error { color: var(--danger, #e05a62); }
+.wiki-note { margin: 8px 0 0 !important; padding-top: 8px; border-top: 1px solid var(--border-strong); color: var(--text-muted); font-size: 12px; }
+.optional-tag { margin-left: 5px; padding: 2px 7px; border-radius: 999px; background: var(--bg-surface-raised); color: var(--text-muted); font-size: 11px; font-weight: 500; }
 .dialog p { margin: 0 0 12px; line-height: 1.6; }
 .dialog-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }

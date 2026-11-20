@@ -13,6 +13,10 @@ ENV PIP_CONSTRAINT=/opt/constraints.txt
 COPY packages/platform_core /opt/platform/packages/platform_core
 RUN pip install --no-cache-dir /opt/platform/packages/platform_core
 
+COPY packages/wiki/wiki /opt/platform/wiki
+RUN pip install --no-cache-dir "mcp>=1.9"
+ENV PYTHONPATH=/opt/platform:/opt/platform/packages:/app
+
 COPY services/core/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 

@@ -16,6 +16,7 @@ import logging
 import uuid
 from fastapi import APIRouter, Body, HTTPException, Query
 from fastapi.responses import Response
+from starlette.concurrency import run_in_threadpool
 from platform_core.fastapi import auth_disabled
 
 from agents.ba_agent.constants import SECTION_OPEN_QUESTIONS, TIER1_SECTIONS
@@ -404,8 +405,17 @@ async def designer_handoff(session_id: str, body: dict = Body(default={})):
         raise HTTPException(status_code=503, detail="Designer handoff is disabled")
     envelope = await export_validated_package(session_id, user_id=USER_ID)
     description_override = body.get("project_description") if isinstance(body, dict) else None
-    _publish_assets(session_id, envelope, sync_project_wiki=True, required=True,
-                    project_description_override=description_override)
+    # Publishing the project Wiki includes synchronous Basic Memory MCP calls
+    # (BasicMemoryClient uses anyio.run). Keep that work off the async request
+    # thread so anyio can create its own event loop safely.
+    await run_in_threadpool(
+        _publish_assets,
+        session_id,
+        envelope,
+        sync_project_wiki=True,
+        required=True,
+        project_description_override=description_override,
+    )
     correlation_id = str(envelope.get("correlation_id") or session_id)
     db = _get_db()
     record = None

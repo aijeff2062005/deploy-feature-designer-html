@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS wiki_source (
   namespace TEXT NOT NULL,
   project_id TEXT,
   storage_uri TEXT NOT NULL,
-  markdown_extract TEXT NOT NULL,
+  markdown_extract TEXT,
   page_map TEXT NOT NULL DEFAULT '[]',
   ingested_at TEXT NOT NULL,
   ingested_by TEXT NOT NULL
@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS wiki_source (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_wiki_source_sha_scope
   ON wiki_source(sha256, namespace, COALESCE(project_id, ''));
+ALTER TABLE wiki_source ALTER COLUMN markdown_extract DROP NOT NULL;
 
 CREATE TABLE IF NOT EXISTS wiki_page (
   page_id TEXT PRIMARY KEY,
@@ -52,7 +53,7 @@ CREATE TABLE IF NOT EXISTS wiki_page (
   disambiguation TEXT,
   status TEXT NOT NULL,
   version TEXT NOT NULL,
-  body TEXT NOT NULL,
+  body TEXT,
   source_ids TEXT NOT NULL DEFAULT '[]',
   owner TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -63,7 +64,7 @@ CREATE TABLE IF NOT EXISTS wiki_revision (
   page_id TEXT NOT NULL REFERENCES wiki_page(page_id),
   version TEXT NOT NULL,
   status TEXT NOT NULL,
-  body_snapshot TEXT NOT NULL,
+  body_snapshot TEXT,
   diff_ref TEXT,
   actor TEXT NOT NULL,
   created_at TEXT NOT NULL
@@ -208,6 +209,8 @@ def connect(root: Path | None = None) -> Connection:
                 cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
                 cur.execute(f'SET search_path TO "{schema}"')
                 cur.execute(SCHEMA)
+                cur.execute("ALTER TABLE wiki_page ALTER COLUMN body DROP NOT NULL")
+                cur.execute("ALTER TABLE wiki_revision ALTER COLUMN body_snapshot DROP NOT NULL")
             finally:
                 cur.execute("SELECT pg_advisory_unlock(hashtext('wiki-schema-init'))")
         _initialized.add(schema)
