@@ -1567,7 +1567,8 @@ class HtmlDesigner:
         # Keep the exact selected preview recoverable for Project Wiki approval.
         # The JPEG is the same rendered image shown in the style picker; the raw
         # HTML/CSS and dimensions are already part of each option payload.
-        public_previews = [{key: value for key, value in item.items() if key != "qa_errors"}
+        public_previews = [{key: value for key, value in item.items()
+                            if key not in {"qa_errors", "rendered_image"}}
                            for item in previews]
         await self._emit(run, "style.inherited.preview" if inherited_candidate else "style.previews", {
             "screen_id": screen.id, "screen_name": screen.name,
