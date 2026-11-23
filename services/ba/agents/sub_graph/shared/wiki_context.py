@@ -25,6 +25,9 @@ def _feature_keywords(state: dict[str, Any]) -> list[str]:
     title = state.get("feature_title")
     if title:
         texts.append(str(title))
+    description = state.get("feature_description")
+    if description:
+        texts.append(str(description)[:120])
     out: list[str] = []
     seen: set[str] = set()
     for text in texts:
@@ -52,14 +55,8 @@ def collect_approved_wiki_hits(
     try:
         seen: set[str] = set()
         hits: list[dict[str, Any]] = []
-        for hit in wiki.list_approved(
-            project_id=project_id, agent_name="ba-agent", limit=limit
-        ):
-            pid = str(hit.get("page_id") or "")
-            if not pid or pid in seen:
-                continue
-            seen.add(pid)
-            hits.append(hit)
+        # Put feature-relevant search hits first. Listing recent pages first
+        # used to fill the limit before relevant pages could be considered.
         for query in _feature_keywords(state):
             for hit in wiki.search(
                 query,
@@ -76,6 +73,17 @@ def collect_approved_wiki_hits(
                     break
             if len(hits) >= limit:
                 break
+        if len(hits) < limit:
+            for hit in wiki.list_approved(
+                project_id=project_id, agent_name="ba-agent", limit=limit
+            ):
+                pid = str(hit.get("page_id") or "")
+                if not pid or pid in seen:
+                    continue
+                seen.add(pid)
+                hits.append(hit)
+                if len(hits) >= limit:
+                    break
         return hits[:limit]
     finally:
         if own_store:
@@ -87,26 +95,52 @@ def format_approved_wiki_context(
     *,
     store: WikiStore | None = None,
     limit: int = 12,
+    include_content: bool = False,
 ) -> str:
-    """Markdown/text block for LLM inject: acknowledge first, delta only."""
-    hits = collect_approved_wiki_hits(state, store=store, limit=limit)
+    """Approved project/company Wiki context, optionally including source bodies."""
+    own_store = store is None
+    wiki = store or get_wiki_store()
+    try:
+        hits = collect_approved_wiki_hits(state, store=wiki, limit=limit)
+    except Exception:
+        if own_store:
+            wiki.close()
+        raise
     header = (
         "=== APPROVED WIKI (already agreed) ===\n"
-        "Rules: (1) Acknowledge existing wiki titles/ids first. "
-        "(2) Only brainstorm the NEW idea if it is the same topic as this feature. "
-        "(3) Do NOT auto-overwrite artifacts from wiki. "
+        "Rules: (1) Read approved sources and decide which facts are project-wide or clearly applicable to this feature. "
+        "(2) Reuse evidence-backed applicable facts without asking the user to repeat them; cite the source. "
+        "(3) Similarity or frequency alone does not prove applicability; do not copy unrelated feature-specific scope or rules. "
         "(4) Agents never approve or write wiki — humans approve. "
-        "(5) If the idea is a different product, mark scope_out / OQ; do not rewrite agreed text.\n"
+        "(5) If sources conflict or applicability is unclear, ask a focused question. "
+        "(6) Do not tell the user that no context was found; ask naturally about unresolved requirements.\n"
     )
     if not hits:
+        if own_store:
+            wiki.close()
         return header + "(no approved wiki pages for this project + company corpus)\n"
-    compact = [
-        {
-            "page_id": h.get("page_id"),
-            "title": h.get("title"),
-            "snippet": h.get("snippet"),
-            "version": h.get("version"),
+    compact = []
+    remaining_chars = 18_000
+    for hit in hits:
+        item = {
+            "page_id": hit.get("page_id"),
+            "title": hit.get("title"),
+            "namespace": hit.get("namespace"),
+            "version": hit.get("version"),
+            "snippet": hit.get("snippet"),
         }
-        for h in hits
-    ]
+        if include_content and remaining_chars > 0:
+            page_id = str(hit.get("page_id") or "")
+            try:
+                page = wiki.fetch(page_id, project_id=resolve_project_id(state), agent_name="ba-agent") if page_id else None
+            except Exception:
+                page = None
+            if page:
+                body = str(page.get("body") or "")
+                body = body[:min(6_000, remaining_chars)]
+                item["approved_source_content"] = body
+                remaining_chars -= len(body)
+        compact.append(item)
+    if own_store:
+        wiki.close()
     return header + json.dumps(compact, ensure_ascii=False, indent=2) + "\n"

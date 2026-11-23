@@ -113,6 +113,7 @@ let featureStatus = 'DRAFT';
 let packageExported = false;
 let designerEnabled = false;
 let projectId = '';
+let projectMemoryContext = {};
 let bpmnExpanded = false;
 let openQuestions = [];
 let assumptions = [];
@@ -291,6 +292,9 @@ function applyStateUpdate(stateData, fallbackSectionId) {
 
   if (stateData.feature_status) {
     featureStatus = stateData.feature_status;
+  }
+  if (stateData.project_context && typeof stateData.project_context === 'object') {
+    projectMemoryContext = stateData.project_context;
   }
   if (stateData.package_exported != null) {
     packageExported = Boolean(stateData.package_exported);
@@ -1096,7 +1100,7 @@ function ensureOpenQuestionsIntro(sectionId) {
   chatHistories[sectionId] = history;
 }
 
-async function loadSectionHistory(sectionId, initialPitch = '', { refresh = false } = {}) {
+async function loadSectionHistory(sectionId, { refresh = false } = {}) {
   const local = Array.isArray(chatHistories[sectionId]) ? chatHistories[sectionId] : [];
   try {
     const historyRes = await getChatHistory(sessionId, sectionId);
@@ -1120,20 +1124,10 @@ async function loadSectionHistory(sectionId, initialPitch = '', { refresh = fals
     } else {
       chatHistories[sectionId] = [];
       if (sectionId === 'feature_definition') {
-        if (initialPitch && initialPitch.trim()) {
-          // If initial pitch/description exists, auto-trigger it as first user message!
-          chatInput.value = initialPitch.trim();
-          setTimeout(() => {
-            handleSend();
-          }, 150);
-        } else {
-          // Fallback greeting if pitch is empty
-          chatHistories['feature_definition'].push({
-            sender: 'agent',
-            text: `Xin chào! Tôi là BA Agent.\n\nBạn đang bắt đầu phân tích feature: "${featureTitle}"\n\nỞ section đầu tiên — Feature Definition — tôi cần bạn cung cấp:\n\n1. Goal: Tại sao feature này cần tồn tại? (business value)\n2. Actors: Ai tham gia vào luồng này? (ít nhất 2)\n3. Scope In: Feature này bao gồm những gì?\n4. Scope Out: Feature này KHÔNG bao gồm những gì?\n\nHãy bắt đầu mô tả cho tôi nhé!`,
-          });
-          chatHistories['feature_definition'][chatHistories['feature_definition'].length - 1].text += '\n\nNgoài ra, feature này có kế thừa từ feature đã duyệt trước đó không, và có nhánh nào bàn giao sang feature tiếp theo không? Nếu có, mô tả từng nhánh theo điều kiện và kết quả; BA Agent sẽ hỏi tiếp phần nguồn, đích và phạm vi còn thiếu. Nếu không, xác nhận feature độc lập.';
-        }
+        // The feature brief lives in session state. Always let the BA Agent
+        // inspect it together with approved project knowledge before replying.
+        // The internal start signal is hidden from the user transcript.
+        setTimeout(() => { void handleSendWithAction(null, { internalStart: true }); }, 0);
       } else if (sectionId === 'business_rules') {
         chatHistories[sectionId].push({
           sender: 'agent',
@@ -1229,14 +1223,13 @@ async function init() {
     if (savedIndex >= 0) activeSectionIndex = savedIndex;
   } catch { /* storage may be unavailable */ }
 
-  let featureDescription = '';
   // Reconcile legacy scope before loading flags; no synthetic chat turn.
   try { await reconcileContinuity(sessionId); } catch (err) { console.warn('Continuity sync:', err); }
   // Try to load existing data from DB
   try {
     const feature = await getFeature(sessionId);
     if (feature) {
-      featureDescription = feature.description || '';
+      if (feature.project_context && typeof feature.project_context === 'object') projectMemoryContext = feature.project_context;
       if (feature.feature_status) featureStatus = feature.feature_status;
       if (feature.package_exported != null) packageExported = Boolean(feature.package_exported);
       if (feature.designer_enabled != null) designerEnabled = Boolean(feature.designer_enabled);
@@ -1279,7 +1272,7 @@ async function init() {
     vaLink.href = factoryPageHref('va.html');
   }
   syncFactoryDockLinks();
-  await loadSectionHistory(SECTIONS[activeSectionIndex].id, featureDescription);
+  await loadSectionHistory(SECTIONS[activeSectionIndex].id);
   if (canProceedToValidation) {
     await loadWikiDocuments();
   }
@@ -1670,6 +1663,19 @@ function renderWorkspace() {
       ['Điều kiện đầu vào', continuity.entry_state],
       ['Nguồn đã duyệt', [continuity.predecessor_version, continuity.predecessor_end_state_id].filter(Boolean).join(' · ')],
     ].filter(([, value]) => value);
+    const relatedFeatures = Array.isArray(projectMemoryContext.related_features) ? projectMemoryContext.related_features : [];
+    const actorMentions = Array.isArray(projectMemoryContext.actor_mentions) ? projectMemoryContext.actor_mentions : [];
+    const memorySummary = `<div style="display:grid;gap:7px;">
+            ${actorMentions.length ? `<div style="font-size:10px;color:var(--text-dim);">Actor trong các feature liên quan đã duyệt (nguồn tham khảo để Agent đánh giá): ${actorMentions.map(item => `${escapeHtml(item.value)} (${escapeHtml((item.sources || []).map(source => source.title).join(', '))})`).join(' · ')}</div>` : ''}
+            ${relatedFeatures.map(item => `<div style="padding:7px 8px;border:1px solid var(--border-color,#34364a);border-radius:7px;font-size:11px;"><strong>${escapeHtml(item.title)}</strong>${item.version ? ` · v${escapeHtml(item.version)}` : ''}${item.goal ? `<div style="margin-top:3px;color:var(--text-dim);">${escapeHtml(item.goal)}</div>` : ''}${item.continuity ? `<div style="margin-top:3px;color:var(--text-dim);">Ngữ cảnh bàn giao: ${escapeHtml(item.continuity.slice(0, 260))}</div>` : ''}</div>`).join('')}
+          </div>`;
+    const hasMemoryContext = actorMentions.length || relatedFeatures.length;
+    const memoryPanel = projectMemoryContext.status !== 'ready' || !hasMemoryContext
+      ? ''
+      : `<div class="field-group" style="padding:10px 11px;border:1px solid var(--border-color,#34364a);border-radius:9px;background:rgba(255,255,255,.02);">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:7px;"><strong style="font-size:12px;">Nguồn tham khảo từ Project Wiki</strong><span style="font-size:10px;color:var(--text-dim);">Agent tự đánh giá mức áp dụng</span></div>
+      ${memorySummary}
+    </div>`;
 
     const renderChips = (list, field, chipClass) => {
       if (!list || list.length === 0) {
@@ -1689,6 +1695,7 @@ function renderWorkspace() {
     };
 
     wsEl.innerHTML = `
+      ${memoryPanel}
       <div class="field-group">
         <label class="field-label">Mục tiêu (Goal)</label>
         <textarea class="field-textarea" readonly placeholder="Mục tiêu sẽ hiển thị khi được định nghĩa...">${data.goal || ''}</textarea>
@@ -1892,7 +1899,7 @@ async function selectSection(idx) {
 
   activeSectionIndex = idx;
   try { localStorage.setItem(activeSectionStorageKey(sessionId), sec.id); } catch { /* storage may be unavailable */ }
-  await loadSectionHistory(sec.id, '', { refresh: true });
+  await loadSectionHistory(sec.id, { refresh: true });
   renderAll();
 }
 
@@ -2149,6 +2156,7 @@ function injectValidationReport(sectionId, agentMsg) {
 
 async function refreshFeatureState() {
   const feature = await getFeature(sessionId);
+  if (feature?.project_context && typeof feature.project_context === 'object') projectMemoryContext = feature.project_context;
   if (feature?.feature_status) {
     featureStatus = feature.feature_status;
   }
@@ -2181,14 +2189,14 @@ async function refreshFeatureState() {
   updateGlobalProgress();
 }
 
-async function handleSendWithAction(action = null) {
-  const text = chatInput.value.trim();
+async function handleSendWithAction(action = null, { internalStart = false } = {}) {
+  const text = internalStart ? '__INTERNAL_BA_START__' : chatInput.value.trim();
   if (!text || isSending) return;
   if (isChatFrozen() && action !== 'validate') return;
 
   const sec = SECTIONS[activeSectionIndex];
   let fullPayloadText = text;
-  if (pendingEdits.length > 0) {
+  if (!internalStart && pendingEdits.length > 0) {
     const preambleLines = pendingEdits.map(edit => {
       const verb = edit.type === 'REMOVE' ? 'Xóa' : 'Thêm';
       const prep = edit.type === 'REMOVE' ? 'ra khỏi' : 'vào';
@@ -2199,8 +2207,10 @@ async function handleSendWithAction(action = null) {
     renderPendingEditsBanner();
   }
 
-  chatHistories[sec.id].push({ sender: 'user', text: fullPayloadText });
-  chatInput.value = '';
+  if (!internalStart) {
+    chatHistories[sec.id].push({ sender: 'user', text: fullPayloadText });
+    chatInput.value = '';
+  }
   renderChatMessages();
 
   if (sectionStates[sec.id].status === 'active') {
@@ -2217,7 +2227,7 @@ async function handleSendWithAction(action = null) {
 
   let currentAgentMsg = null;
   try {
-    await sendChatMessage(sessionId, fullPayloadText, sec.id, { action, assets: referenceAssets }, {
+    await sendChatMessage(sessionId, fullPayloadText, sec.id, { action, assets: referenceAssets, internalStart }, {
       onMessage: (data) => {
         removeTypingIndicator();
         if (!currentAgentMsg) {

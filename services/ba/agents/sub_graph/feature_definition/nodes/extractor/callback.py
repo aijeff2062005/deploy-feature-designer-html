@@ -11,6 +11,7 @@ from google.adk.models.llm_response import LlmResponse
 from agents.sub_graph.feature_definition.schemas import FeatureDefinitionData
 from callbacks.inject_context import insert_context
 from agents.sub_graph.shared.wiki_context import format_approved_wiki_context
+from agents.sub_graph.shared.project_context import fd_context_prompt
 from managers.artifact.artifact_manager import merge_feature_definition_data
 from utils import logging
 from utils.utils import parse_str_to_dict
@@ -91,6 +92,10 @@ async def fd_extractor_inject_callback(
     )
 
     context_text = f"=== CURRENT DATA OF feature_definition ===\n{current_data_str}"
+    context_text += (
+        "\n=== USER-PROVIDED FEATURE BRIEF ===\n"
+        + str(state.get("feature_description") or "(not provided)")
+    )
     continuity = artifacts.get("continuity") or {}
     unresolved = [
         index for index, handoff in enumerate(continuity.get("handoffs") or [], start=1)
@@ -105,7 +110,8 @@ async def fd_extractor_inject_callback(
             "Return the complete preserved handoffs list only if evidence supports an update. "
             "An empty field does not prove the user has not supplied the information."
         )
-    context_text += "\n" + format_approved_wiki_context(state)
+    context_text += "\n" + format_approved_wiki_context(state, include_content=True)
+    context_text += "\n" + fd_context_prompt(state.get("project_context"))
     insert_context(llm_request, context_text)
     logger.info(
         f"fd_extractor_inject_callback: [ARTIFACT STATE] Current FD Artifact = {artifacts}"

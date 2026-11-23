@@ -122,7 +122,7 @@ def route_ba_turn(ctx: Context) -> str:
     return user_input
 
 
-@node(name="ba_router")
+@node(name="ba_router", rerun_on_resume=True)
 async def ba_router_node(ctx: Context) -> str:
     """Route by ticket_type + active_section. Unimplemented paths go to stub/locked."""
     user_input = route_ba_turn(ctx)

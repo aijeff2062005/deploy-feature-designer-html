@@ -72,6 +72,7 @@ from managers.service.assets import (
     feature_markdown_path,
     publish_ba_package,
 )
+from agents.sub_graph.shared.project_context import load_project_context
 from managers.service.state_helpers import is_user_facing_author
 from managers.service.wiki_validation_status import (
     annotate_document_hit,
@@ -146,6 +147,9 @@ async def create_feature(req: CreateFeatureRequest):
         require_project(requested, BA_ROLE)
     project_id = requested or project_id_for_session(session_id)
     session_service = get_session_service()
+    project_context = await run_in_threadpool(
+        load_project_context, project_id, req.title, req.description
+    )
 
     await session_service.create_session(
         app_name=APP_NAME,
@@ -156,6 +160,7 @@ async def create_feature(req: CreateFeatureRequest):
             title=req.title,
             description=req.description,
             project_id=project_id,
+            project_context=project_context,
         ),
     )
 
@@ -252,6 +257,14 @@ async def get_feature(session_id: str):
                 )
         status = normalize_feature_status(control.get("feature_status"))
         artifacts = control.get("artifacts") or {}
+        feature_definition = artifacts.get("feature_definition")
+        if isinstance(feature_definition, dict) and feature_definition and "feature_definition" not in sections:
+            sections["feature_definition"] = SectionProgress(
+                section_id="feature_definition",
+                data=feature_definition,
+                flags=(control.get("flags") or {}).get("fd", {}),
+                is_completable=False,
+            )
         bpmn = artifacts.get("bpmn_reference")
         if isinstance(bpmn, dict) and bpmn and "bpmn_reference" not in sections:
             sections["bpmn_reference"] = SectionProgress(
@@ -292,6 +305,7 @@ async def get_feature(session_id: str):
             last_validation=last_va_dict,
             can_generate_bpmn=can_generate_bpmn(control) and not is_readonly(status),
             active_user_story_id=control.get("active_user_story_id"),
+            project_context=control.get("project_context") or {},
             created_at=pkg.created_at,
             updated_at=pkg.updated_at,
         )
@@ -730,6 +744,10 @@ async def get_chat_history(
             author = getattr(event, "author", None)
 
             if event.content.role == "user":
+                if full_text.startswith("__INTERNAL_BA_START__"):
+                    pending_user = None
+                    pending_section = active_section
+                    continue
                 pending_user = full_text
                 pending_section = active_section
                 continue
@@ -768,8 +786,22 @@ async def get_chat_history(
     )
     if pending_user is not None and pending_belongs_to_section:
         messages.append(ChatMessageItem(sender="user", text=pending_user))
+        state = dict(session.state) if session is not None else {}
+        last_error = state.get("_chat_last_error") or {}
+        failed_section = str(last_error.get("section") or "")
+        current_section = section or pending_section or active_section
+        if (
+            failed_section
+            and failed_section == current_section
+            and failed_section != SECTION_OPEN_QUESTIONS
+        ):
+            messages.append(
+                ChatMessageItem(
+                    sender="agent",
+                    text="⚠️ Lượt chat trước đã dừng do lỗi xử lý. Nội dung của bạn vẫn được lưu; hãy gửi lại để thử tiếp.",
+                )
+            )
         if section == SECTION_OPEN_QUESTIONS and session is not None:
-            state = dict(session.state)
             current_turn = state.get("current_turn")
             active_turn = state.get("_oq_stream_active_turn")
             result_turn = (state.get("_oq_sync_result") or {}).get("turn")

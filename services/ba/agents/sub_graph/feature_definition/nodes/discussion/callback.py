@@ -17,6 +17,7 @@ from agents.sub_graph.feature_definition.constants import (
 )
 from callbacks.inject_context import insert_context
 from agents.sub_graph.shared.wiki_context import format_approved_wiki_context
+from agents.sub_graph.shared.project_context import fd_context_prompt
 from utils import logging
 
 logger = logging()
@@ -111,7 +112,10 @@ async def fd_discussion_inject_callback(
     }
 
     context_blocks = [
-        format_approved_wiki_context(state),
+        "=== USER-PROVIDED FEATURE BRIEF ===\n"
+        + str(state.get("feature_description") or "(not provided)"),
+        format_approved_wiki_context(state, include_content=True),
+        fd_context_prompt(state.get("project_context")),
         f"=== CURRENT ARTIFACT DATA ===\n{json.dumps(current_artifact_data, ensure_ascii=False, indent=2)}",
         f"=== CHECKLIST ===\n{json.dumps(checklist, ensure_ascii=False, indent=2)}",
         f"=== OPEN QUESTIONS ===\n{json.dumps(oqs, ensure_ascii=False, indent=2)}",

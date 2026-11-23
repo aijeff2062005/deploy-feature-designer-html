@@ -35,6 +35,12 @@ from managers.service.state_helpers import (
 from utils import logging
 
 logger = logging()
+INTERNAL_START_TOKEN = "__INTERNAL_BA_START__"
+INTERNAL_START_PROMPT = (
+    "Begin the Feature Definition analysis using the user-provided feature brief and the injected approved Project Wiki and project-memory sources. "
+    "Decide which facts are truly project-wide or directly applicable, reuse those with their source, and ask only focused questions for unresolved requirements. "
+    "Do not mention that no context was found and do not invent applicability."
+)
 
 router = APIRouter(prefix="/api/v1/chat", tags=["Unify AI Agent - V1"])
 TURN_TIMEOUT_SECONDS = 300
@@ -48,6 +54,8 @@ def _validate_chat_input(session_id: str, req: AgentChatRequest) -> None:
 
     if not req.user_message or not req.user_message.strip():
         raise HTTPException(status_code=400, detail="user_message không được để trống")
+    if req.internal_start and (req.active_section or DEFAULT_SECTION) != DEFAULT_SECTION:
+        raise HTTPException(status_code=400, detail="Internal start is only valid for Feature Definition")
 
 
 async def _reject_if_chat_frozen(
@@ -148,7 +156,7 @@ async def chat_message_sync(session_id: str, req: AgentChatRequest):
 
     content = types.Content(
         role="user",
-        parts=[types.Part.from_text(text=user_message)],
+        parts=[types.Part.from_text(text=(f"{INTERNAL_START_TOKEN}\n{INTERNAL_START_PROMPT}" if req.internal_start else user_message))],
     )
 
     agent_text = ""
@@ -237,6 +245,7 @@ async def chat_message_stream(session_id: str, req: AgentChatRequest):
 
     apply_request_to_session_state(session.state, req)
     state_delta = request_state_delta(req)
+    await persist_control_delta(session_id, {"_chat_last_error": None}, user_id=user_id)
     if req.active_section == SECTION_OPEN_QUESTIONS:
         expected_turn = int(session.state.get("current_turn", 0)) + 1
         # Persist before returning the stream so history polling knows this turn
@@ -252,7 +261,7 @@ async def chat_message_stream(session_id: str, req: AgentChatRequest):
 
     content = types.Content(
         role="user",
-        parts=[types.Part.from_text(text=req.user_message)],
+        parts=[types.Part.from_text(text=(f"{INTERNAL_START_TOKEN}\n{INTERNAL_START_PROMPT}" if req.internal_start else req.user_message))],
     )
 
     async def event_generator():
@@ -358,6 +367,18 @@ async def chat_message_stream(session_id: str, req: AgentChatRequest):
                             logger.warning(
                                 f"Failed to persist OQ sync failure state: {persist_error}"
                             )
+                if error_message:
+                    state = await persist_control_delta(
+                        session_id,
+                        {
+                            "_chat_last_error": {
+                                "section": req.active_section,
+                                "message": str(error_message)[:500],
+                                "turn": state.get("current_turn"),
+                            }
+                        },
+                        user_id=user_id,
+                    )
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"Failed to persist session artifacts: {e}")
 

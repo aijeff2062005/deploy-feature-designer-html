@@ -158,8 +158,9 @@ def initial_feature_state(
     title: str,
     description: str,
     project_id: str | None = None,
+    project_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    state = {
         "session_id": session_id,
         "feature_id": session_id,
         "feature_title": title,
@@ -170,4 +171,6 @@ def initial_feature_state(
         STATE_TICKET_TYPE: DEFAULT_TICKET_TYPE,
         STATE_ACTIVE_SECTION: DEFAULT_SECTION,
         STATE_ACTIVE_USER_STORY_ID: None,
+        "project_context": project_context or {},
     }
+    return state

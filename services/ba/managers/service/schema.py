@@ -62,6 +62,10 @@ class AgentChatRequest(BaseModel):
         default_factory=list,
         description="External image/logo references for the Designer handoff.",
     )
+    internal_start: bool = Field(
+        default=False,
+        description="Run the first BA analysis turn without displaying a synthetic user message.",
+    )
 
 
 # ── V1 Chat Response Models ──────────────────────────────────
@@ -170,6 +174,7 @@ class FeatureResponse(BaseModel):
     last_validation: dict[str, Any] | None = None
     can_generate_bpmn: bool = False
     active_user_story_id: str | None = None
+    project_context: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

@@ -8,6 +8,8 @@ import uuid
 from pathlib import PurePosixPath
 from typing import Any
 
+import yaml
+
 from platform_core.storage import get_storage, project_key
 
 _PROJECT = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
@@ -151,6 +153,12 @@ class ProjectFileWiki:
         parts = content.split("---", 2)
         if len(parts) != 3 or parts[0].strip():
             return {}, content
+        try:
+            parsed = yaml.safe_load(parts[1])
+        except yaml.YAMLError:
+            parsed = None
+        if isinstance(parsed, dict):
+            return parsed, parts[2].lstrip("\r\n")
         metadata: dict[str, Any] = {}
         for line in parts[1].splitlines():
             key, separator, value = line.partition(":")
@@ -159,7 +167,16 @@ class ProjectFileWiki:
             try:
                 metadata[key.strip()] = json.loads(value.strip())
             except json.JSONDecodeError:
-                metadata[key.strip()] = value.strip().strip('"')
+                # Basic Memory normalizes JSON-written frontmatter into YAML and
+                # may emit single-quoted scalars (for example ``version: '1'``).
+                # json.loads does not accept YAML single quotes, so retain the
+                # scalar value without its YAML quoting characters.
+                scalar = value.strip()
+                if len(scalar) >= 2 and scalar[0] == scalar[-1] == "'":
+                    scalar = scalar[1:-1].replace("''", "'")
+                elif len(scalar) >= 2 and scalar[0] == scalar[-1] == '"':
+                    scalar = scalar[1:-1]
+                metadata[key.strip()] = scalar
         return metadata, parts[2].lstrip("\r\n")
 
     def read(self, project_id: str, path: str) -> bytes:

@@ -39,6 +39,43 @@ def fingerprint(fd):
     return hashlib.sha256(json.dumps(fd, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
+def materialize_legacy_handoffs(fd):
+    """Promote legacy single-link continuity fields into the branch schema.
+
+    Older feature sessions stored one predecessor/successor at the continuity
+    root. Keep those values as the source of truth while making them available
+    to the branch-level validator and downstream consumers.
+    """
+    updated = copy.deepcopy(fd)
+    continuity = dict(updated.get("continuity") or {})
+    if continuity.get("has_successor") is True and not continuity.get("handoffs"):
+        branch = {
+            "branch_condition": continuity.get("exit_state"),
+            "successor_feature_id": continuity.get("successor_feature_id"),
+            "successor_feature_title": continuity.get("successor_feature_title"),
+            "exit_state_id": continuity.get("exit_state_id"),
+            "workflow_end_state_id": continuity.get("workflow_end_state_id"),
+            "exit_state": continuity.get("exit_state"),
+            "deferred_scope": continuity.get("deferred_scope") or [],
+        }
+        continuity["handoffs"] = [{key: value for key, value in branch.items() if value is not None}]
+    if continuity.get("has_predecessor") is True and not continuity.get("incoming_handoffs"):
+        incoming = {
+            "predecessor_feature_id": continuity.get("predecessor_feature_id"),
+            "predecessor_feature_title": continuity.get("predecessor_feature_title"),
+            "predecessor_version": continuity.get("predecessor_version"),
+            "predecessor_end_state_id": continuity.get("predecessor_end_state_id"),
+            "predecessor_end_state": continuity.get("predecessor_end_state"),
+            "entry_state": continuity.get("entry_state"),
+        }
+        if incoming["predecessor_feature_id"] or incoming["predecessor_feature_title"]:
+            continuity["incoming_handoffs"] = [
+                {key: value for key, value in incoming.items() if value is not None}
+            ]
+    updated["continuity"] = continuity
+    return updated
+
+
 async def infer_branch(fd, branch):
     sessions = InMemorySessionService()
     await sessions.create_session(app_name="continuity_sync", user_id="sync", session_id="sync")
@@ -109,7 +146,8 @@ async def reconcile_continuity(session_id):
     state = await load_control_state(session_id)
     if is_readonly(state.get("feature_status")) or package_was_exported(state):
         return {"status": "skipped"}
-    fd = (state.get("artifacts") or {}).get("feature_definition") or {}
+    source_fd = (state.get("artifacts") or {}).get("feature_definition") or {}
+    fd = materialize_legacy_handoffs(source_fd)
     branches = (fd.get("continuity") or {}).get("handoffs") or []
     key = fingerprint(fd)
     if not fd.get("scope_out") or not any(not b.get("deferred_scope") for b in branches):
@@ -123,9 +161,11 @@ async def reconcile_continuity(session_id):
             or is_readonly(latest.get("feature_status")) or package_was_exported(latest)):
         return {"status": "changed_during_sync"}
     updated = apply_matches(fd, result)
-    if updated == fd:
+    if updated == fd and fd == source_fd:
         await persist_control_delta(session_id, {"_continuity_sync_v2": key})
         return {"status": "needs_clarification"}
+    if updated == fd:
+        updated = fd
     latest["artifacts"]["feature_definition"] = updated
     check_fd_flags_logic(SimpleNamespace(state=latest))
     updates = {k: latest[k] for k in ("artifacts", "flags", "sections_status", "section_completable") if k in latest}

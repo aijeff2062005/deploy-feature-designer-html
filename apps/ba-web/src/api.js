@@ -198,7 +198,7 @@ export async function getChatHistory(sessionId, selectSection = 'feature_definit
  * @returns {Promise<void>}
  */
 export async function sendChatMessage(sessionId, message, sectionId, options = {}, handlers = {}) {
-  const { action = null, assets = [] } = options;
+  const { action = null, assets = [], internalStart = false } = options;
   // OQ sync runs one artifact update per question, so a batch of answers may
   // legitimately take longer than the normal chat request timeout.
   const timeoutMs = options.timeoutMs ?? (sectionId === 'open_questions' ? 960000 : 330000);
@@ -213,6 +213,7 @@ export async function sendChatMessage(sessionId, message, sectionId, options = {
       user_message: message,
       active_section: sectionId,
     };
+    if (internalStart) body.internal_start = true;
     if (action) body.action = action;
     if (Array.isArray(assets) && assets.length) body.assets = assets;
 
