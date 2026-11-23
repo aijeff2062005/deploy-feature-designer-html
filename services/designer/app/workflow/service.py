@@ -223,6 +223,20 @@ async def _project_wiki_snapshot(store: Store, designer: HtmlDesigner, run_id: U
     }
 
 
+async def _project_agent_owns_design_wiki(store: Store, project_id: str) -> bool:
+    """Keep a project-level Agent template canonical when feature runs are approved."""
+    wiki = await store.get_project_design_wiki(project_id)
+    baseline = (wiki or {}).get("baseline") or {}
+    if not (baseline.get("selected_ui_sample") or baseline.get("project_template")):
+        return False
+    source_id = (wiki or {}).get("source_session_id") or baseline.get("source_session_id")
+    try:
+        source_session = await store.get_session(UUID(str(source_id))) if source_id else None
+    except (TypeError, ValueError):
+        source_session = None
+    return bool(source_session and source_session.source == "project-design-system")
+
+
 class RunService:
     def __init__(
         self,
@@ -356,7 +370,8 @@ class RunService:
             await self._trace_decision(run_id, run.revision, "review.next_stage", "checkpoint == final and decision == approved", "complete_run")
             session = await self.store.get_session(run.session_id)
             brief = await self.store.get_design_brief(run.session_id)
-            if session and session.project_id and brief and brief.selected_style_contract:
+            if (session and session.project_id and brief and brief.selected_style_contract
+                    and not await _project_agent_owns_design_wiki(self.store, session.project_id)):
                 wiki = await self.store.get_project_design_wiki(session.project_id)
                 previous_baseline = (wiki or {}).get("baseline") or {}
                 previous_contract = previous_baseline.get("contract") or {}

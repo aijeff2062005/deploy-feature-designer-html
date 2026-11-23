@@ -19,6 +19,24 @@ export type ProjectSummary = {
 export type Member = { id: string; username: string; name: string; roles: string[] };
 export type ProjectDetail = ProjectSummary & { members: Member[] };
 export type HulyProjectMatch = { id: string; huly_id: string; identifier: string; name: string };
+export type DesignerChatSession = { id: string; project_id: string; title: string };
+export type DesignerChatRun = { id: string; status: string; prompt?: string; assistant_message?: string | null; created_at?: string; error?: { message?: string } | null };
+export type ProjectStyleOption = {
+  key: string; name: string; tagline?: string; direction?: string; html: string; compiled_css: string;
+  preview_width?: number; preview_height?: number; recommended?: boolean;
+};
+export type FigmaAnalysis = {
+  filename: string;
+  summary: { colors?: number; texts?: number; shadows?: number; radii?: number; spacing?: number; fonts?: string[] };
+  component_count: number;
+  screen_count: number;
+  components: { id: string; name: string; variants?: unknown[] }[];
+  screens: { id: string; name: string; type?: string }[];
+  template_candidates: { id: string; name: string; page: string; width: number; height: number; score: number; looks_like_template: boolean; html?: string }[];
+  has_template: boolean;
+  recommended_template: { id: string; name: string; page: string; width: number; height: number; score: number; looks_like_template: boolean; html: string } | null;
+  unresolved: { kind: string; question: string; node_name?: string; page?: string }[];
+};
 
 export type Artifact = {
   id: string;
@@ -104,6 +122,38 @@ async function modulePost<T>(url: string, body: unknown): Promise<T> {
 }
 
 export const api = {
+  analyzeFigmaFile: async (file: File) => {
+    const query = new URLSearchParams({ filename: file.name });
+    const res = await fetch(`/designer/api/v1/design-systems/analyze?${query}`, {
+      method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/octet-stream" }, body: file,
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      const detail = body?.detail;
+      throw new ApiError(res.status, typeof detail === "string" ? detail : detail?.message ?? res.statusText);
+    }
+    return res.json() as Promise<FigmaAnalysis>;
+  },
+  importFigmaFile: async (projectId: string, file: File) => {
+    const query = new URLSearchParams({ project_id: projectId, name: file.name.replace(/\.fig$/i, ""), filename: file.name });
+    const res = await fetch(`/designer/api/v1/design-systems?${query}`, {
+      method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/octet-stream" }, body: file,
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      const detail = body?.detail;
+      throw new ApiError(res.status, typeof detail === "string" ? detail : detail?.message ?? res.statusText);
+    }
+    return res.json() as Promise<{ id: string; status: "importing" | "ready" | "failed"; name: string; error?: string | null }>;
+  },
+  getDesignSystem: (id: string) => moduleGet<{ id: string; name: string; status: "importing" | "ready" | "failed"; error?: string | null }>(
+    `/designer/api/v1/design-systems/${encodeURIComponent(id)}`,
+  ),
+  approveFigmaTemplate: (projectId: string, designSystemId: string, frameId: string) =>
+    modulePost<{ project_id: string; version: number; name: string; design_system_id: string; selected_ui_sample: unknown }>(
+      `/designer/api/v1/project-wiki/approve-figma-template?project_id=${encodeURIComponent(projectId)}`,
+      { design_system_id: designSystemId, frame_id: frameId },
+    ),
   journey: (projectId: string, featureId: string) =>
     call<Journey>(`/projects/${encodeURIComponent(projectId)}/features/${encodeURIComponent(featureId)}/journey`),
   createFeature: (projectId: string, title: string, description: string) =>
@@ -118,6 +168,32 @@ export const api = {
     moduleGet<BaFeature[]>(`/ba/api/features?project_id=${encodeURIComponent(projectId)}`),
   designerSessions: (projectId: string) =>
     moduleGet<DesignerSession[]>(`/designer/api/v1/sessions?project_id=${encodeURIComponent(projectId)}`),
+  designerRuns: (sessionId: string) =>
+    moduleGet<DesignerChatRun[]>(`/designer/api/v1/sessions/${encodeURIComponent(sessionId)}/runs`),
+  projectDesignWiki: (projectId: string) =>
+    moduleGet<{ current: { version: number; baseline: { contract?: { name?: string } }; source_session_id?: string } | null }>(
+      `/designer/api/v1/project-wiki?project_id=${encodeURIComponent(projectId)}`,
+    ),
+  createProjectDesignSession: (projectId: string, projectName: string, projectDescription: string, designSystemId?: string) =>
+    modulePost<DesignerChatSession>("/designer/api/v1/project-design-system/sessions", {
+      project_id: projectId, project_name: projectName, project_description: projectDescription,
+      ...(designSystemId ? { design_system_id: designSystemId } : {}),
+    }),
+  sendDesignerMessage: (sessionId: string, content: string) =>
+    modulePost<DesignerChatRun>(`/designer/api/v1/sessions/${encodeURIComponent(sessionId)}/messages`, {
+      content, screen_name_hint: "Project design system", platform_hint: "responsive", library_ids: [],
+    }),
+  getDesignerRun: (runId: string) =>
+    moduleGet<DesignerChatRun>(`/designer/api/v1/runs/${encodeURIComponent(runId)}`),
+  getDesignerRunEvents: (runId: string) =>
+    moduleGet<{ id: string; type: string; payload: Record<string, unknown> }[]>(
+      `/designer/api/v1/runs/${encodeURIComponent(runId)}/event-history`,
+    ),
+  approveProjectDesignTemplate: (projectId: string, sessionId: string, runId: string, optionKey: string) =>
+    modulePost<{ version: number; name: string; template_key: string }>(
+      `/designer/api/v1/project-wiki/approve-template?project_id=${encodeURIComponent(projectId)}`,
+      { session_id: sessionId, run_id: runId, option_key: optionKey },
+    ),
   wiki: (projectId: string) => moduleGet<WikiList>(`/ba/api/wiki/pages?project_id=${encodeURIComponent(projectId)}`),
   me: () => call<User>("/me"),
   mockUsers: () => call<MockUser[]>("/auth/mock-users"),
@@ -129,6 +205,11 @@ export const api = {
   project: (id: string) => call<ProjectDetail>(`/projects/${encodeURIComponent(id)}`),
   createProject: (name: string, description: string, hulyUrl = "") =>
     call<ProjectSummary>("/projects", { method: "POST", body: JSON.stringify({ name, description, huly_url: hulyUrl }) }),
+  updateProject: (id: string, name: string, description: string, hulyUrl = "") =>
+    call<{ id: string; name: string; description: string; huly_url: string; huly_project_id: string; huly_project_name: string }>(
+      `/projects/${encodeURIComponent(id)}`,
+      { method: "PUT", body: JSON.stringify({ name, description, huly_url: hulyUrl }) },
+    ),
   resolveHulyProject: (hulyUrl: string) =>
     call<HulyProjectMatch>("/projects/resolve-huly", { method: "POST", body: JSON.stringify({ huly_url: hulyUrl }) }),
   retryProjectWikiBootstrap: (id: string) =>

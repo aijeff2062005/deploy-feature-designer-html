@@ -38,9 +38,55 @@ class ImportedDesignSystem:
     tokens: Tokens
     components: list[dict[str, Any]] = field(default_factory=list)
     variants: list[Variant] = field(default_factory=list)
+    screens: list[dict[str, Any]] = field(default_factory=list)
+    unresolved: list[dict[str, Any]] = field(default_factory=list)
+    template_candidates: list[dict[str, Any]] = field(default_factory=list)
 
     def index(self) -> dict[str, Any]:
-        return {"tokens": self.tokens.summary(), "components": self.components}
+        return {
+            "schema_version": 1,
+            "source": {"type": "figma_local_file", "name": self.name},
+            "tokens": self.tokens.summary(),
+            "design_system": {"schema_version": 1, "source": "figma", "tokens": self.tokens.records(),
+                              "components": self.components, "screens": self.screens,
+                              "unresolved": self.unresolved},
+            "components": self.components,
+        }
+
+
+def _figma_id(node: Node) -> str:
+    guid = node.get("guid") or {}
+    return f"{guid.get('sessionID', '')}:{guid.get('localID', '')}"
+
+
+def _screen_tree(scene: Scene, node: Node, depth: int = 0) -> dict[str, Any]:
+    item = {"id": _figma_id(node), "name": node.get("name", "Untitled"), "type": node.get("type", "")}
+    if depth < 4:
+        children = [child for child in scene.children(node) if not child.get("isSoftDeleted")]
+        if children:
+            item["children"] = [_screen_tree(scene, child, depth + 1) for child in children[:80]]
+    return item
+
+
+def _unresolved_items(scene: Scene) -> list[dict[str, Any]]:
+    """Flag only objectively unnamed styles and unstyled editable text; never invent values."""
+    items = []
+    for node in scene.nodes.values():
+        if node.get("isSoftDeleted"):
+            continue
+        style_type = node.get("styleType")
+        if style_type and not str(node.get("name") or "").strip():
+            items.append({"kind": "unnamed_style", "node_id": _figma_id(node),
+                          "question": f"Đặt tên/ý nghĩa cho style {style_type} này để map vào token ngữ nghĩa."})
+        if node.get("type") == "TEXT" and str(node.get("characters") or "").strip() and not node.get("textStyleId"):
+            page = scene.page(node)
+            items.append({"kind": "unstyled_text", "node_id": _figma_id(node),
+                          "node_name": node.get("name", "Text layer"), "page": (page or {}).get("name", ""),
+                          "text_sample": str(node.get("characters", ""))[:120],
+                          "question": "Xác nhận typography/ý nghĩa nội dung cho text layer chưa gắn text style."})
+        if len(items) >= 200:
+            break
+    return items
 
 
 def _props(name: str) -> dict[str, str]:
@@ -74,11 +120,49 @@ def import_fig(data: bytes, name: str) -> ImportedDesignSystem:
     result = ImportedDesignSystem(
         name=name, theme_css=theme_css(tokens, DEFAULT_THEME), fonts=font_urls(tokens.fonts), tokens=tokens
     )
-    taken: set[str] = set()
 
     def visible_page(node: Node) -> Node | None:
         page = scene.page(node)
         return None if page is None or page.get("internalOnly") else page
+
+    result.unresolved = _unresolved_items(scene)
+    template_words = re.compile(
+        r"\b(template|screen|home|dashboard|checkout|login|sign[ -]?up|landing|onboarding|search results|"
+        r"trang chủ|màn hình|man[- ]?hinh|thanh toán)\b", re.I,
+    )
+    for node in scene.of_type("FRAME"):
+        parent = scene.parent(node)
+        page = visible_page(node)
+        if node.get("isSoftDeleted") or node.get("isStateGroup") or not parent or parent.get("type") != "CANVAS" or not page:
+            continue
+        children = [child for child in scene.children(node) if not child.get("isSoftDeleted")]
+        size = node.get("size") or {"x": 0, "y": 0}
+        width, height = size.get("x", 0), size.get("y", 0)
+        ratio = width / height if height else 0
+        nested = [grandchild for child in children for grandchild in scene.children(child)
+                  if not grandchild.get("isSoftDeleted")]
+        content_nodes = children + nested
+        text_count = sum(child.get("type") == "TEXT" for child in content_nodes)
+        structure_count = sum(child.get("type") in {"FRAME", "SYMBOL", "INSTANCE"} for child in content_nodes)
+        plausible_screen_size = 320 <= width <= 2560 and 480 <= height <= 2200 and 0.25 <= ratio <= 2.5
+        named_screen = bool(template_words.search(str(node.get("name", ""))))
+        substantial_ui = len(children) >= 8 and text_count >= 3 and structure_count >= 3
+        score = min(100, len(children) * 8 + (24 if template_words.search(str(node.get("name", ""))) else 0)
+                    + (16 if size.get("x", 0) >= 300 and size.get("y", 0) >= 400 else 0))
+        result.template_candidates.append({
+            "id": _figma_id(node), "name": node.get("name", "Màn hình chưa đặt tên"),
+            "page": page.get("name", ""), "width": round(size.get("x", 0)),
+            "height": round(height), "child_count": len(children),
+            "score": score, "looks_like_template": plausible_screen_size and (named_screen or substantial_ui),
+            "html": converter.component_html(node, node.get("name", "Figma screen"))[:60_000],
+        })
+    result.template_candidates.sort(key=lambda item: item["score"], reverse=True)
+    screen_ids = {item["id"] for item in result.template_candidates if item["looks_like_template"]}
+    result.screens = [
+        _screen_tree(scene, node) for node in scene.of_type("FRAME")
+        if _figma_id(node) in screen_ids
+    ][:100]
+    taken: set[str] = set()
 
     def add(entry_node: Node, variants: list[Node], set_props: bool) -> None:
         base = slug(entry_node.get("name", ""), "component")

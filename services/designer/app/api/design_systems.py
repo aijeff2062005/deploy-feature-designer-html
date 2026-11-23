@@ -7,6 +7,7 @@ A design system belongs to a project (members read, DESIGNER/ADMIN import and de
 from __future__ import annotations
 
 import asyncio
+import logging
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Query, Request, Response, status
@@ -14,6 +15,7 @@ from platform_core.fastapi import auth_disabled, require_project
 
 from ..core.errors import AppError, not_found
 from ..designsystem.gallery import gallery_fragment
+from ..designsystem.importer import import_fig
 from ..designsystem.service import DEFAULT_CONTEXT, run_import
 from ..models import DEFAULT_DESIGN_SYSTEM, DesignSystemDetail, DesignSystemView, SessionDesignSystem, SessionView
 from ..render import build_document
@@ -25,6 +27,7 @@ router = APIRouter(prefix="/api/v1")
 MAX_FIG_BYTES = 100 * 1024 * 1024
 GALLERY_PAGE = 120
 _imports: set[asyncio.Task[None]] = set()
+logger = logging.getLogger(__name__)
 
 
 def _require(project_id: str | None, role: str | None = None) -> None:
@@ -52,6 +55,55 @@ async def _get(request: Request, ds_id: str) -> DesignSystemDetail:
 async def list_design_systems(request: Request, project_id: str | None = Query(None)) -> list[DesignSystemView]:
     _require(project_id)
     return [_default_view(), *await request.app.state.store.list_design_systems(project_id)]
+
+
+@router.post("/design-systems/analyze")
+async def analyze_figma_file(
+    request: Request,
+    filename: str = Query("design-system.fig", max_length=240),
+) -> dict:
+    """Analyze a local Figma file before a project exists; this endpoint does not persist it."""
+    data = await request.body()
+    if not data:
+        raise AppError("FIG_EMPTY", "Empty upload", "Send the .fig file as the request body.", 422)
+    if len(data) > MAX_FIG_BYTES:
+        raise AppError("FIG_TOO_LARGE", "File is too large", "Use a .fig smaller than 100 MB.", 413)
+    if not (data[:2] == b"PK" or data[:8] == b"fig-kiwi"):
+        raise AppError("FIG_INVALID", "Not a Figma file", "Export it from Figma with File → Save local copy.", 422)
+    try:
+        imported = await asyncio.to_thread(import_fig, data, filename)
+    except Exception as error:  # noqa: BLE001 - return a useful validation error for malformed .fig files.
+        logger.exception("Could not analyze Figma upload %s (%d bytes)", filename, len(data))
+        raise AppError("FIG_PARSE_FAILED", "Could not analyze Figma file",
+                       "The file could not be parsed. Export a fresh local copy from Figma and try again.", 422) from error
+    candidates = imported.template_candidates
+    detected = [item for item in candidates if item["looks_like_template"]]
+    preview_source = detected
+    preview = None
+    if preview_source:
+        item = preview_source[0]
+        preview = {key: item[key] for key in ("id", "name", "page", "width", "height", "score", "looks_like_template")}
+        preview["html"] = build_document(item["html"], vendor_base=vendor_base(request),
+                                         theme_css=imported.theme_css, fonts=imported.fonts,
+                                         title=str(item["name"]))
+    return {
+        "filename": filename,
+        "summary": imported.tokens.summary(),
+        "component_count": len(imported.components),
+        "screen_count": len(imported.screens),
+        "components": imported.components[:100],
+        "screens": [{key: item.get(key) for key in ("id", "name", "type")} for item in imported.screens],
+        "template_candidates": [
+            {**{key: item[key] for key in ("id", "name", "page", "width", "height", "score", "looks_like_template")},
+             **({"html": build_document(item["html"], vendor_base=vendor_base(request),
+                                       theme_css=imported.theme_css, fonts=imported.fonts,
+                                       title=str(item["name"]))} if index < 6 else {})}
+            for index, item in enumerate(candidates[:30])
+        ],
+        "has_template": bool(detected),
+        "recommended_template": preview,
+        "unresolved": imported.unresolved[:50],
+    }
 
 
 @router.post("/design-systems", response_model=DesignSystemView, status_code=status.HTTP_202_ACCEPTED)

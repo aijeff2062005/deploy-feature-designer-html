@@ -55,6 +55,35 @@ class Tokens:
     text_styles: dict[Any, str] = field(default_factory=dict)
     effect_styles: dict[Any, str] = field(default_factory=dict)
     color_vars: dict[Any, str] = field(default_factory=dict)
+    source_names: dict[tuple[str, Any], str] = field(default_factory=dict)
+
+    def records(self) -> list[dict[str, Any]]:
+        """Return the portable semantic token shape shared by all input paths."""
+        records: list[dict[str, Any]] = []
+        groups = (("color", self.colors), ("typography", self.texts), ("shadow", self.shadows),
+                  ("radius", self.radii), ("spacing", self.spacing))
+        for category, values in groups:
+            for name, value in values.items():
+                provenance = []
+                mappings = {
+                    "color": (("figma_style", self.fill_styles), ("figma_variable", self.color_vars)),
+                    "typography": (("figma_style", self.text_styles),),
+                    "shadow": (("figma_style", self.effect_styles),),
+                    "radius": (), "spacing": (),
+                }.get(category, ())
+                for source_kind, mapping in mappings:
+                    provenance.extend(
+                        {"kind": source_kind, "id": _ref_id(ref),
+                         "name": self.source_names.get((source_kind, ref), name)}
+                        for ref, token in mapping.items() if token == name
+                    )
+                aliases = [role for role, token in self.semantic.items() if token == name]
+                records.append({"name": name, "category": category, "value": value,
+                                "semantic_roles": aliases, "provenance": provenance})
+        for family in self.fonts:
+            records.append({"name": f"font-{slug(family)}", "category": "font", "value": family,
+                            "semantic_roles": [], "provenance": []})
+        return records
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -62,6 +91,12 @@ class Tokens:
             "radii": len(self.radii), "spacing": len(self.spacing), "fonts": self.fonts[:4],
             "semantic": self.semantic,
         }
+
+
+def _ref_id(ref: Any) -> str:
+    if isinstance(ref, tuple):
+        return f"{ref[0]}:{ref[1]}"
+    return str(ref)
 
 
 def _put(store: dict[str, Any], name: str, value: Any) -> str:
@@ -140,6 +175,7 @@ def extract_tokens(scene: Scene) -> Tokens:
                     token = _put(t.colors, name, hex_color(paints[-1]["color"], paints[-1].get("opacity", 1.0)))
                     for ref in _refs(node):
                         t.fill_styles[ref] = token
+                        t.source_names[("figma_style", ref)] = node.get("name", "")
             elif style_type == "TEXT" and node.get("fontSize"):
                 lh = node.get("lineHeight") or {}
                 size = node["fontSize"]
@@ -154,12 +190,14 @@ def extract_tokens(scene: Scene) -> Tokens:
                 })
                 for ref in _refs(node):
                     t.text_styles[ref] = token
+                    t.source_names[("figma_style", ref)] = node.get("name", "")
             elif style_type == "EFFECT":
                 css = shadow_css(node.get("effects", []))
                 if css:
                     token = _put(t.shadows, name, css)
                     for ref in _refs(node):
                         t.effect_styles[ref] = token
+                        t.source_names[("figma_style", ref)] = node.get("name", "")
         if node.get("type") == "VARIABLE":
             value = _variable_value(scene, node)
             parent = scene.nodes.get(ref_of(node.get("variableSetID") or {})) if node.get("variableSetID", {}).get("guid") else None
@@ -170,6 +208,7 @@ def extract_tokens(scene: Scene) -> Tokens:
                 token = _put(t.colors, full, hex_color(value))
                 for ref in _refs(node):
                     t.color_vars[ref] = token
+                    t.source_names[("figma_variable", ref)] = node.get("name", "")
             elif resolved == "FLOAT" and isinstance(value, (int, float)):
                 if re.search(r"radius|corner|rounded", name):
                     _put(t.radii, re.sub(r"^(border-?)?radius-?", "", name) or "base", value)

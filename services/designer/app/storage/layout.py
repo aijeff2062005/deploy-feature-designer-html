@@ -51,5 +51,9 @@ def project_design_wiki_key(project_id: str, version: int) -> str:
     return _key(project_id, "wiki", "design-system", f"v{version:04d}.md")
 
 
+def project_design_template_key(project_id: str, version: int) -> str:
+    return _key(project_id, "wiki", "design-system", f"template-v{version:04d}.json")
+
+
 def output_key(project_id: str | None, run_id: str, filename: str) -> str:
     return _key(project_id, "outputs", str(run_id), filename)

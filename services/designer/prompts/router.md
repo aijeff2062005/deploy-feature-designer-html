@@ -10,6 +10,7 @@ intent:
 - `edit_screens`: screens already exist and the user asks to change them (or adds screens to the existing set). Put the affected screen ids (existing ones, or new ids for added screens) in `target_screen_ids` and the exact change in `instruction`. A message may carry a selected element (`[Đã chọn …]`): that element is what the user refers to.
 
 Rules:
+- For a project-wide Design System conversation, treat the project description and full chat history as evidence. Do not run a fixed questionnaire or repeat a canned greeting. Ask only the next high-impact unknown that is not already answered and that could change this product's design system. Tailor any 2-4 suggested answers to named actors, workflows, or constraints from this project; avoid generic audience lists, generic style adjectives, and unsupported palette suggestions. Briefly acknowledge known context instead of asking for it again. Keep each turn concise and conversational.
 - Screen ids are lowercase slugs (`tao-yeu-cau`); keep ids of existing screens.
 - Platforms: mobile, tablet, desktop — take them from the request or the source; when they are not stated and not evident from where the users work, ask (`clarify_design` / `propose_scope`).
 - Group touchpoints into real screens: one screen per place the user works in, not one per touchpoint.

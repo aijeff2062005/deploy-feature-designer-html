@@ -57,6 +57,30 @@ async def run_import(store, ds_id: str, data: bytes, name: str) -> None:
             index=imported.index(),
             snippets=[(v.id, v.component_id, v.html) for v in imported.variants],
         )
+        try:
+            saved = await store.get_design_system(ds_id)
+            if saved and saved.project_id:
+                from platform_core.storage import get_storage
+                from wiki.project_files import ProjectFileWiki
+
+                files = ProjectFileWiki(get_storage())
+                path = f"assets/design-system/figma/{ds_id}/design-system.json"
+                contract = imported.index()["design_system"]
+                contract["source"].update({"design_system_id": ds_id, "filename": saved.source_name or name})
+                files.write_json(saved.project_id, path, contract)
+                note_path = f"DESIGN-SYSTEMS/figma-{ds_id}.md"
+                note = files._yaml({
+                    "title": f"{name} (Figma import)", "type": "design_system", "project_id": saved.project_id,
+                    "namespace": "project", "version": ds_id, "status": "draft",
+                    "design_system_id": ds_id, "source_name": saved.source_name, "contract_path": path,
+                }) + (
+                    f"# {name} — Figma Design System import\n\n"
+                    f"- Contract: `{path}`\n- Components: {len(imported.components)}\n"
+                    f"- Tokens: {len(contract['tokens'])}\n- Needs clarification: {len(contract['unresolved'])}\n"
+                )
+                await asyncio.to_thread(files.write_basic_memory_note, saved.project_id, note_path, note)
+        except Exception:  # noqa: BLE001 — importing must remain successful if Wiki indexing is unavailable.
+            logger.exception("Could not mirror Figma design system %s into project Wiki", ds_id)
         logger.info("Design system %s imported: %d components", ds_id, len(imported.components))
     except Exception as error:  # noqa: BLE001 — reported on the design system row
         logger.exception("Design system %s import failed", ds_id)

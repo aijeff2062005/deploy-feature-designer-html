@@ -717,19 +717,67 @@ class HtmlDesigner:
                 lines.append(f"Designer: {_clip(r.assistant_message, 800)}")
         return "\n".join(lines) or "(none)"
 
-    def _design_text(self, design: DesignContext, query: str = "") -> str:
-        """Imported design system: its token names and the components relevant to ``query``."""
+    async def _design_text(self, design: DesignContext, query: str = "") -> str:
+        """Imported design system tokens and real Figma component snippets relevant to ``query``."""
         if design.id == DEFAULT_DESIGN_SYSTEM or not design.components:
             return "None imported: use the art direction and the theme tokens."
         tokens = [line.strip().split(":")[0][2:] for line in design.theme_css.splitlines()
                   if line.strip().startswith("--") and "Imported" not in line]
         colors = [t.removeprefix("color-") for t in tokens if t.startswith("color-")][-40:]
         texts = sorted({t.removeprefix("text-").split("--")[0] for t in tokens if t.startswith("text-")})[:24]
-        words = set(re.findall(r"[a-z]+", query.lower()))
-        relevant = [c for c in design.components if words & set(re.findall(r"[a-z]+", c["name"].lower()))][:20]
-        names = ", ".join(c["name"] + (f" ({'/'.join(c['props'])})" if c["props"] else "") for c in relevant or design.components[:20])
+        words = {word for word in re.findall(r"[^\W\d_]+", query.lower(), flags=re.UNICODE) if len(word) > 2}
+        ranked = []
+        for component in design.components:
+            searchable = " ".join([
+                str(component.get("name", "")), str(component.get("description", "")),
+                " ".join(str(key) + " " + " ".join(map(str, values if isinstance(values, list) else [values]))
+                         for key, values in (component.get("props") or {}).items()),
+                " ".join(" ".join(map(str, variant.get("props", {}).values()))
+                         for variant in (component.get("variants") or [])),
+            ]).lower()
+            component_words = set(re.findall(r"[^\W\d_]+", searchable, flags=re.UNICODE))
+            score = len(words & component_words)
+            if score:
+                ranked.append((score, component))
+        ranked.sort(key=lambda item: (-item[0], str(item[1].get("name", "")).lower()))
+        relevant = [component for _, component in ranked]
+        names = ", ".join(
+            str(c.get("name") or c.get("id") or "Component")
+            + (f" ({'/'.join(c['props'])})" if c.get("props") else "")
+            for c in relevant
+        ) or "No component matched this screen's name, purpose, content, actions, or variant labels."
+        variants: list[tuple[str, str, str]] = []
+        for component in relevant:
+            for variant in component.get("variants") or []:
+                variant_id = str(variant.get("id") or "")
+                if variant_id:
+                    variants.append((str(component.get("name") or component.get("id") or "Component"),
+                                     variant_id, str(variant.get("props") or {})))
+        snippet_map = await self.store.get_snippets(design.id, [variant_id for _, variant_id, _ in variants])
+        examples = []
+        remaining = 24_000
+        omitted = 0
+        for name, variant_id, props in variants:
+            snippet = snippet_map.get(variant_id, "").strip()
+            if not snippet or remaining <= 0:
+                omitted += bool(snippet)
+                continue
+            if len(snippet) > remaining:
+                omitted += 1
+                snippet = snippet[:remaining]
+            examples.append(f"### {name} · {props}\n```html\n{snippet}\n```")
+            remaining -= len(snippet)
+        example_text = (
+            "\nScreen-relevant Figma component HTML (reuse matching structures/classes and choose the needed "
+            "variants; replace only feature-specific labels/data, and do not force an unrelated component):\n"
+            + "\n".join(examples)
+            if examples else ""
+        )
+        if omitted:
+            example_text += f"\n{omitted} additional matching variant snippet(s) were omitted only to fit the prompt context."
         return (f"{design.name} (imported from Figma) — match its look. Color utilities: {', '.join(colors)}. "
-                f"Text styles: {', '.join('text-' + t for t in texts)}. Components: {names}.")
+                f"Text styles: {', '.join('text-' + t for t in texts)}. Screen-relevant components: {names}."
+                f"{example_text}")
 
     # ── stage 1: route ──
     async def analyze(self, run_id: UUID, feedback: str = "None") -> None:
@@ -768,6 +816,36 @@ class HtmlDesigner:
                 await self.store.set_session_design_system(session.id, baseline["design_system_id"])
                 session.design_system_id = baseline["design_system_id"]
         usage: dict[str, int] = {}
+        if session.source == "project-design-system":
+            project_context = (
+                "\n\nPROJECT DESIGN SYSTEM AGENT MODE (applies to this entire project):\n"
+                "This conversation establishes the reusable visual baseline and one representative UI template for the project; "
+                "it is not a feature handoff. Use the project name/description and all user answers as source context. "
+                "Never infer a business domain from a project name alone. If the product, its users, or their main goal is unclear, "
+                "ask one concise, relevant question before proposing a direction. Do not follow a fixed questionnaire or fixed order. "
+                "Inspect the project description and prior answers first, then ask only the highest-impact unresolved question that "
+                "could materially change this project's visual system or representative screen. Cover brand constraints, visual "
+                "preference, information density, target devices, and component states only when that specific detail is still unknown "
+                "and matters to the described product; do not ask again when the brief already answers it. If the product domain, "
+                "main workflow, audience, or platform is already clear, acknowledge it briefly and move to a real ambiguity instead "
+                "of asking a generic audience/product question. Begin with a short, concrete interpretation of the product; do not "
+                "repeat the full project description, use a canned greeting, or sound like a survey. When offering answer ideas, derive "
+                "2-4 concise, mutually distinct options from actors, workflows, constraints, and goals explicitly present in this project's "
+                "context and prior answers. Phrase them as optional examples the user can edit. Never fall back to generic industry/persona "
+                "lists, generic style adjectives, or a default color palette that the project context does not support. Vary the wording "
+                "naturally and do not reuse the same introduction across turns. "
+                "For each direct clarification question, end the reply with one line exactly formatted "
+                "'Gợi ý trả lời: lựa chọn A | lựa chọn B | lựa chọn C', with 2-4 context-specific choices. "
+                "Do not include that line when no question is being asked. The user can always answer in their own words. "
+                "Once context is sufficient, summarize it and ask the user to confirm or correct it. Then propose a representative "
+                "screen grounded in the confirmed project purpose and ask for approval. Only after approval, mark one representative "
+                "screen and its content confirmed in the brief, set scope_confirmed=true, and proceed to the rendered three-style "
+                "preview gallery. The gallery options must be genuinely distinct directions generated for this product. "
+                "Do not start a feature UI spec after the user selects a gallery option; that selection saves the project-wide baseline."
+            )
+            run_prompt = project_context + "\n\nProject title and description are already in Current brief.\nUser message: " + run.prompt
+        else:
+            run_prompt = run.prompt
         decision = await self._llm_call("structured", trace_name="router.decide_intent",
             prompt=self.prompts.render(
                 "router",
@@ -775,7 +853,7 @@ class HtmlDesigner:
                 screens=json.dumps([{"id": s.id, "name": s.name, "platform": s.platform} for s in screens], ensure_ascii=False) or "[]",
                 design_rules=knowledge.ui_ux_design_rules(),
                 history=self._history(runs, first_limit=6000),
-                message=_clip(run.prompt, 20_000),
+                message=_clip(run_prompt, 20_000),
             ),
             schema=DesignDecision,
             usage=usage,
@@ -955,6 +1033,14 @@ class HtmlDesigner:
                 template_html = project_files.read(session.project_id, str(selected_sample["html_path"])).decode("utf-8")
                 template_css = project_files.read(session.project_id, str(selected_sample["css_path"])).decode("utf-8")
                 sample_image = project_files.read(session.project_id, str(selected_sample["preview_path"]))
+                design_system = baseline.get("design_system") or {}
+                if not design_system and baseline.get("design_system_path"):
+                    try:
+                        design_system = json.loads(project_files.read(
+                            session.project_id, str(baseline["design_system_path"])
+                        ).decode("utf-8"))
+                    except Exception:
+                        logger.info("Project Design System contract unavailable for %s", session.project_id)
                 saved_visual_system = baseline.get("visual_system") or {}
                 saved_platform = (saved_visual_system.get("platforms") or {}).get(platform) or {}
                 style_profile = saved_platform.get("profile") if isinstance(saved_platform.get("profile"), dict) else {}
@@ -970,6 +1056,7 @@ class HtmlDesigner:
                     "style_profile": style_profile,
                     "template_html": template_html,
                     "template_css": template_css,
+                    "design_system": design_system,
                 }
             except Exception as error:
                 logger.exception("Could not load the selected Project Wiki UI template for project %s", session.project_id)
@@ -980,6 +1067,42 @@ class HtmlDesigner:
                     502,
                     True,
                     action="Retry after restoring the selected Project Wiki UI template.",
+                ) from error
+        project_template = baseline.get("project_template") or {}
+        if project_template.get("storage_key"):
+            try:
+                from platform_core.storage import get_storage
+
+                saved_template = json.loads(get_storage().get(str(project_template["storage_key"])).decode("utf-8"))
+                option = saved_template["option"]
+                image_value = str(option.get("image") or "")
+                image_match = re.match(r"data:[^;]+;base64,(.+)", image_value, re.DOTALL)
+                if not image_match:
+                    raise ValueError("The selected project preview does not contain its rendered image")
+                saved_visual_system = baseline.get("visual_system") or {}
+                saved_platform = (saved_visual_system.get("platforms") or {}).get(platform) or {}
+                return {
+                    "image": base64.b64decode(image_match.group(1)),
+                    "feature_title": baseline.get("source_feature_title") or "Project Design System",
+                    "screen_name": project_template.get("screen_name") or "Project UI template",
+                    "platform": platform,
+                    "style_name": contract.get("name", ""),
+                    "wiki_version": (wiki or {}).get("version"),
+                    "visual_system_source": "selected_project_template",
+                    "style_lock_css": str(option.get("compiled_css") or ""),
+                    "style_profile": saved_platform.get("profile") if isinstance(saved_platform.get("profile"), dict) else {},
+                    "template_html": str(option.get("html") or ""),
+                    "template_css": str(option.get("compiled_css") or ""),
+                }
+            except Exception as error:
+                logger.exception("Could not load the selected Project Design System template for %s", session.project_id)
+                raise AppError(
+                    "PROJECT_WIKI_TEMPLATE_UNAVAILABLE",
+                    "The approved Project Design System template could not be loaded",
+                    "The saved project-wide template is missing its HTML, CSS, or preview image.",
+                    502,
+                    True,
+                    action="Restore or re-approve the Project Design System template.",
                 ) from error
         source_id = (wiki or {}).get("source_session_id")
         if not source_id:
@@ -1078,6 +1201,15 @@ class HtmlDesigner:
                           if isinstance(record, dict) and not record.get("conflict") and record.get("value")]
                 if values:
                     contract_lines.append(f"- Component {role}/{variant}: " + ", ".join(values))
+        design_system = reference.get("design_system") if isinstance(reference.get("design_system"), dict) else {}
+        for token in design_system.get("tokens", []):
+            if isinstance(token, dict) and token.get("name") and token.get("value") is not None:
+                contract_lines.append(f"- Shared token {token['name']} ({token.get('category', 'token')}): {token['value']}")
+        if design_system.get("components"):
+            contract_lines.append(f"- Shared component catalog: {len(design_system['components'])} components")
+        unresolved = design_system.get("unresolved") or []
+        if unresolved:
+            contract_lines.append("- Unresolved Design System items are not approved tokens/components; do not guess their values.")
         contract_text = "\n".join(contract_lines) or "- No reusable semantic values were recorded; follow the selected project visual contract."
         has_selected_template = bool(reference.get("template_html"))
         reference_rule = (
@@ -1273,7 +1405,7 @@ class HtmlDesigner:
                            f"Visual contract: {candidate.model_dump_json(exclude={'key', 'name', 'tagline', 'direction', 'recommended'})}. "
                            "Make its composition, typography, surfaces, color balance and product-specific visual motif unmistakable; "
                            "do not fall back to a generic form or default style." + reference_instruction),
-                design_system=self._design_text(design, query),
+                design_system=await self._design_text(design, query),
                 skill=knowledge.frontend_design_skill() + "\n\n" + knowledge.style_preview_skill(),
                 design_rules=knowledge.ui_ux_design_rules(),
             )
@@ -1638,7 +1770,7 @@ class HtmlDesigner:
                     if imported else
                     "Use the selected project visual contract palette exactly when present; otherwise choose colors for this product."
                 ),
-                design_system=self._design_text(design, query),
+                design_system=await self._design_text(design, query),
                 brief=json.dumps(spec_brief, ensure_ascii=False),
                 style_selection=(f"{brief.style_name}: {safe_style_direction}".strip(": ")
                                  if brief.style_name or safe_style_direction else "No style selected yet."),
@@ -1911,7 +2043,7 @@ class HtmlDesigner:
         system = self.prompts.render(
             "builder", width=width,
             direction=self._direction_text(spec, approved_screen, visual_contract) + reference_instruction,
-            design_system=self._design_text(design, query), skill=knowledge.frontend_design_skill(),
+            design_system=await self._design_text(design, query), skill=knowledge.frontend_design_skill(),
             design_rules=knowledge.ui_ux_design_rules(), style_asset=style_asset,
         )
         usage: dict[str, int] = {}

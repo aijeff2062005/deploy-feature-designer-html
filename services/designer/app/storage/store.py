@@ -656,8 +656,17 @@ class Store:
         value["fonts"] = json.loads(value["fonts"] or "[]")
         value["theme_css"] = value["theme_css"] or ""
         value["components"] = index.get("components", [])
+        value["design_system"] = index.get("design_system", {})
         value["summary"] = {"tokens": index.get("tokens", {}), "components": len(value["components"])}
         return DesignSystemDetail.model_validate(value)
+
+    async def get_design_system_source(self, ds_id: str) -> tuple[str | None, bytes | None]:
+        row = await self._fetchone("SELECT source_name, source_key FROM design_systems WHERE id=?", (ds_id,))
+        if row is None or not row.get("source_key"):
+            return (row.get("source_name") if row else None), None
+        from platform_core.storage import get_storage
+
+        return row.get("source_name"), get_storage().get(str(row["source_key"]))
 
     async def get_snippets(self, ds_id: str, variant_ids: list[str]) -> dict[str, str]:
         if not variant_ids:

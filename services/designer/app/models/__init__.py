@@ -277,6 +277,7 @@ class DesignSystemDetail(DesignSystemView):
     theme_css: str = ""
     fonts: list[str] = Field(default_factory=list)
     components: list[dict[str, Any]] = Field(default_factory=list)
+    design_system: dict[str, Any] = Field(default_factory=dict)
 
 
 class SessionDesignSystem(BaseModel):

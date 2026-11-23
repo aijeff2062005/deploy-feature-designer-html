@@ -41,8 +41,12 @@ class LoginIn(BaseModel):
 
 class ProjectIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
-    description: str = Field(default="", max_length=2000)
+    description: str = Field(min_length=1, max_length=2000)
     huly_url: str = Field(default="", max_length=1000)
+
+
+class ProjectUpdateIn(ProjectIn):
+    pass
 
 
 class HulyResolveIn(BaseModel):
@@ -198,6 +202,10 @@ def list_projects() -> list[dict[str, Any]]:
 @private.post("/projects", status_code=201)
 def create_project(body: ProjectIn) -> dict[str, Any]:
     user = get_current_user()
+    if not body.name.strip():
+        raise HTTPException(422, detail={"code": "PROJECT_NAME_REQUIRED", "message": "Project name is required"})
+    if not body.description.strip():
+        raise HTTPException(422, detail={"code": "PROJECT_DESCRIPTION_REQUIRED", "message": "Project description is required"})
     ascii_name = unicodedata.normalize("NFKD", body.name.replace("Đ", "D").replace("đ", "d"))
     ascii_name = "".join(c for c in ascii_name if not unicodedata.combining(c))
     slug = re.sub(r"[^A-Z0-9]+", "-", ascii_name.upper()).strip("-")[:16].strip("-") or "PROJECT"
@@ -230,6 +238,36 @@ def create_project(body: ProjectIn) -> dict[str, Any]:
             "huly_url": huly_url, "huly_project_id": (huly_project or {}).get("huly_id", ""),
             "huly_project_name": (huly_project or {}).get("name", ""), "my_roles": roles, "wiki_bootstrap_status": status,
             "wiki_bootstrap_error": error, "wiki_template_version": version}
+
+
+@private.put("/projects/{project_id}")
+def update_project(project_id: str, body: ProjectUpdateIn) -> dict[str, Any]:
+    user = get_current_user()
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(422, detail={"code": "PROJECT_NAME_REQUIRED", "message": "Project name is required"})
+    if not body.description.strip():
+        raise HTTPException(422, detail={"code": "PROJECT_DESCRIPTION_REQUIRED", "message": "Project description is required"})
+    huly_url = body.huly_url.strip()
+    huly_project = None
+    if huly_url:
+        parsed = urlsplit(huly_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise HTTPException(422, detail={"code": "HULY_URL_INVALID", "message": "Huly URL must be an http(s) URL"})
+        huly_project = _resolve_huly_project(huly_url)
+    with connection() as conn:
+        _require_member(conn, project_id, user, admin=True)
+        result = conn.execute(
+            "UPDATE projects SET name=%s, description=%s, huly_url=%s, huly_project_id=%s, huly_project_name=%s "
+            "WHERE id=%s AND archived_at IS NULL RETURNING id, name, description, huly_url, huly_project_id, huly_project_name",
+            (name, body.description.strip(), huly_url,
+             str(huly_project.get("huly_id", "")) if huly_project else "",
+             str(huly_project.get("name", "")) if huly_project else "", project_id),
+        ).fetchone()
+    if not result:
+        raise HTTPException(404, detail={"code": "PROJECT_NOT_FOUND", "message": "Project not found"})
+    clear_cache()
+    return result
 
 
 def _run_project_wiki_bootstrap(project_id: str, name: str, description: str, huly_url: str, huly_project: dict[str, Any] | None = None) -> tuple[str, str | None, str | None]:

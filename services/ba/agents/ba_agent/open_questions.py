@@ -176,12 +176,12 @@ def format_open_questions_reply(state: dict) -> str:
             if str(item.get("status") or "open").lower() != "resolved"
         ]
         if unresolved:
-            lines.append("CÃ²n cÃ¢u há»i chÆ°a Ä‘Æ°á»£c báº¡n tráº£ lá»i:")
+            lines.append("Còn câu hỏi chưa được bạn trả lời:")
             lines.extend(
                 f"- **{item.get('id', 'OQ')}**: {item.get('question', '')}"
                 for item in unresolved
             )
-            lines.append("Báº¡n cÃ³ thá»ƒ tráº£ lá»i cÃ¡c cÃ¢u cÃ²n thiáº¿u theo mÃ£ OQ; cÃ¡c cÃ¢u Ä‘Ã£ tráº£ lá»i sáº½ Ä‘Æ°á»£c giá»¯ láº¡i.")
+            lines.append("Bạn có thể trả lời các câu còn thiếu theo mã OQ; các câu đã trả lời sẽ được giữ lại.")
         if result.get("errors"):
             lines.append("Chi tiết: " + "; ".join(result["errors"]))
         lines.append(
@@ -212,12 +212,12 @@ def format_open_questions_reply(state: dict) -> str:
             if str(item.get("status") or "open").lower() != "resolved"
         ]
         if unresolved:
-            lines.append("CÃ²n cÃ¢u há»i cáº§n báº¡n chá»‘t:")
+            lines.append("Còn câu hỏi cần bạn chốt:")
             lines.extend(
                 f"- **{item.get('id', 'OQ')}** ({item.get('severity', 'warning')}): {item.get('question', '')}"
                 for item in unresolved
             )
-            lines.append("Tráº£ lá»i theo mÃ£ OQ; cÃ¡c cÃ¢u Ä‘Ã£ Ä‘á»“ng bá»™ khÃ´ng cáº§n tráº£ lá»i láº¡i.")
+            lines.append("Trả lời theo mã OQ; các câu đã đồng bộ không cần trả lời lại.")
             return "\n".join(lines)
         if can_proceed_to_validation(state):
             lines.append("Đã rà soát package, hiện không còn blocker đã phát hiện ở bước này. Bạn có thể chạy Validate chính thức.")

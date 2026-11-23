@@ -7,6 +7,7 @@ import {
   CircleAlert,
   Download,
   FileJson,
+  FileUp,
   FolderKanban,
   LayoutGrid,
   Layers,
@@ -19,8 +20,10 @@ import {
   PenTool,
   Plus,
   Search,
+  Sparkles,
   Sun,
   UserPlus,
+  UploadCloud,
   Users,
   Workflow,
   X,
@@ -34,6 +37,7 @@ import {
   type DesignerSession,
   type Journey,
   type JourneyStep,
+  type FigmaAnalysis,
   type MockUser,
   type ProjectDetail,
   type ProjectSummary,
@@ -42,6 +46,7 @@ import {
   api,
 } from "./api";
 import { toggleTheme, useThemeMode } from "./theme";
+import { ProjectDesignSystemChat } from "./ProjectDesignSystemChat";
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -132,6 +137,9 @@ export function App() {
   const [user, setUser] = useState<User | null | undefined>(undefined);
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [creating, setCreating] = useState(false);
+  const [createdProject, setCreatedProject] = useState<{ id: string; name: string; description: string; hulyUrl?: string } | null>(null);
+  const [projectDesignSetup, setProjectDesignSetup] = useState<{ projectId: string; name: string; description: string; designSystemId?: string; figmaContext?: boolean } | null>(null);
+  const [projectRefresh, setProjectRefresh] = useState(0);
   const [railPref, setRailPref] = useState(readRailPref);
   const [journeyRailOpen, setJourneyRailOpen] = useState(false);
 
@@ -190,7 +198,7 @@ export function App() {
     try { localStorage.setItem(RAIL_KEY, next ? "1" : "0"); } catch { /* private mode */ }
   };
 
-  const ctx: ShellCtx = { me: user, projects, navigate, createProject: () => setCreating(true), onLogout: logout };
+  const ctx: ShellCtx = { me: user, projects, navigate, createProject: () => { setCreatedProject(null); setCreating(true); }, onLogout: logout };
   const enc = (id: string) => encodeURIComponent(id);
 
   return (
@@ -211,9 +219,15 @@ export function App() {
             <ProjectPage
               key={projectId}
               projectId={projectId}
+              refreshKey={projectRefresh}
               me={user}
               onBack={() => navigate("/")}
               onOpenFeature={(fid) => navigate(`/projects/${enc(projectId)}/f/${enc(fid)}`)}
+              onOpenDesignSystem={(id, name, description, hulyUrl) => {
+                setCreatedProject({ id, name, description, hulyUrl });
+                setCreating(true);
+                setProjectDesignSetup({ projectId: id, name, description });
+              }}
             />
           ) : (
             <HomePage me={user} onOpenProject={(id) => navigate(`/projects/${enc(id)}`)} />
@@ -225,13 +239,70 @@ export function App() {
           title="Dự án mới"
           note="Bạn là PM của dự án (làm cả BA và Designer) và có quyền quản trị thành viên."
           submitLabel="Tạo dự án"
-          onClose={() => setCreating(false)}
+          showDesignSetup
+          created={createdProject}
+          onClose={() => { setCreating(false); setProjectDesignSetup(null); if (createdProject) navigate(`/projects/${enc(createdProject.id)}`); setCreatedProject(null); }}
+          onOpenProject={() => { if (createdProject) navigate(`/projects/${enc(createdProject.id)}`); setCreating(false); setProjectDesignSetup(null); setCreatedProject(null); }}
           includeHulyUrl
-          onSubmit={async (name, description, hulyUrl) => {
+          onSubmit={async (name, description, hulyUrl, designMode, figmaFile, figmaFrameId, figmaHasTemplate, onProgress) => {
+            if (createdProject) {
+              const updated = await api.updateProject(createdProject.id, name, description, hulyUrl);
+              setCreatedProject({ id: updated.id, name: updated.name, description: updated.description, hulyUrl: updated.huly_url });
+              setProjectDesignSetup({ projectId: updated.id, name: updated.name, description: updated.description });
+              loadProjects();
+              setProjectRefresh((value) => value + 1);
+              return;
+            }
             const created = await api.createProject(name, description, hulyUrl);
-            setCreating(false);
+            setCreatedProject({ id: created.id, name: created.name, description, hulyUrl: created.huly_url });
             loadProjects();
-            navigate(`/projects/${enc(created.id)}`);
+            if (designMode === "figma" && figmaFile) {
+              onProgress?.("Project đã tạo · đang nạp file Figma…");
+              const imported = await api.importFigmaFile(created.id, figmaFile);
+              let state = imported;
+              for (let attempt = 0; state.status === "importing" && attempt < 90; attempt += 1) {
+                await new Promise((resolve) => window.setTimeout(resolve, 1000));
+                if (attempt % 5 === 0) onProgress?.("Đang phân tích styles, components và màn hình Figma…");
+                state = await api.getDesignSystem(imported.id);
+              }
+              if (state.status !== "ready") throw new Error(state.error || "Không import được Design System từ file Figma.");
+              if (figmaHasTemplate && figmaFrameId) {
+                onProgress?.("Đang lưu màn hình tham chiếu vào Project Wiki…");
+                await api.approveFigmaTemplate(created.id, imported.id, figmaFrameId);
+                navigate(`/projects/${enc(created.id)}`);
+                setProjectDesignSetup({ projectId: created.id, name: created.name, description, designSystemId: imported.id, figmaContext: true });
+                return;
+              }
+              navigate(`/projects/${enc(created.id)}`);
+              setProjectDesignSetup({ projectId: created.id, name: created.name, description, designSystemId: imported.id, figmaContext: true });
+              return;
+            }
+            if (designMode === "qa") {
+              navigate(`/projects/${enc(created.id)}`);
+              setCreatedProject({ id: created.id, name: created.name, description, hulyUrl: created.huly_url });
+              setProjectDesignSetup({ projectId: created.id, name: created.name, description });
+            } else {
+              setCreating(false);
+              setCreatedProject(null);
+              if (designMode === "figma") navigate(`/projects/${enc(created.id)}/designer`);
+              else navigate(`/projects/${enc(created.id)}`);
+            }
+          }}
+        />
+      )}
+      {projectDesignSetup && (
+        <ProjectDesignSystemChat
+          projectId={projectDesignSetup.projectId}
+          projectName={projectDesignSetup.name}
+          description={projectDesignSetup.description}
+          designSystemId={projectDesignSetup.designSystemId}
+          figmaContext={projectDesignSetup.figmaContext}
+          creationFlow={!!createdProject && creating && createdProject.id === projectDesignSetup.projectId}
+          onClose={() => { setProjectDesignSetup(null); setCreating(false); setCreatedProject(null); }}
+          onOpenDesigner={(sessionId) => {
+            const project = encodeURIComponent(projectDesignSetup.projectId);
+            navigate(`/projects/${project}/designer?session=${encodeURIComponent(sessionId)}`);
+            setProjectDesignSetup(null);
           }}
         />
       )}
@@ -561,18 +632,56 @@ function CreateDialog(props: {
   submitLabel: string;
   nameLabel?: string;
   includeHulyUrl?: boolean;
+  showDesignSetup?: boolean;
+  created?: { id: string; name: string; description: string; hulyUrl?: string } | null;
+  onOpenProject?: () => void;
   onClose: () => void;
-  onSubmit: (name: string, description: string, hulyUrl?: string) => Promise<void>;
+  onSubmit: (name: string, description: string, hulyUrl?: string, designMode?: "figma" | "qa" | "later", figmaFile?: File, figmaFrameId?: string, figmaHasTemplate?: boolean, onProgress?: (message: string) => void) => Promise<void>;
 }) {
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
-  const [hulyUrl, setHulyUrl] = useState("");
+  const [editing, setEditing] = useState(Boolean(props.created));
+  const [name, setName] = useState(props.created?.name ?? "");
+  const [description, setDescription] = useState(props.created?.description ?? "");
+  const [hulyUrl, setHulyUrl] = useState(props.created?.hulyUrl ?? "");
   const [hulyMatch, setHulyMatch] = useState<{ name: string; id: string } | null>(null);
   const [hulyState, setHulyState] = useState<"idle" | "loading" | "resolved" | "error">("idle");
   const [hulyError, setHulyError] = useState("");
   const [nameEdited, setNameEdited] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [busyMessage, setBusyMessage] = useState("");
+  const [successMessage, setSuccessMessage] = useState("");
+  const [designMode, setDesignMode] = useState<"figma" | "qa" | "later" | "">(props.created ? "qa" : "");
+  const [validationAttempted, setValidationAttempted] = useState(false);
+  const [shakeMissing, setShakeMissing] = useState(false);
+  const [figmaFile, setFigmaFile] = useState<File | null>(null);
+  const [figmaAnalysis, setFigmaAnalysis] = useState<FigmaAnalysis | null>(null);
+  const [figmaAnalyzing, setFigmaAnalyzing] = useState(false);
+  const [figmaError, setFigmaError] = useState("");
+  const [selectedTemplateId, setSelectedTemplateId] = useState("");
+  const [figmaDragOver, setFigmaDragOver] = useState(false);
+  const figmaInputRef = useRef<HTMLInputElement>(null);
+  const createFormRef = useRef<HTMLFormElement>(null);
+  const showFigmaAgent = props.showDesignSetup && !editing && designMode === "figma";
+
+  const analyzeFigmaFile = async (file: File | null) => {
+    setFigmaFile(file);
+    setFigmaAnalysis(null);
+    setSelectedTemplateId("");
+    setFigmaError("");
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith(".fig")) { setFigmaError("Chọn file có đuôi .fig."); return; }
+    if (file.size > 100 * 1024 * 1024) { setFigmaError("File Figma vượt quá giới hạn 100 MB."); return; }
+    setFigmaAnalyzing(true);
+    try {
+      const result = await api.analyzeFigmaFile(file);
+      setFigmaAnalysis(result);
+      setSelectedTemplateId(result.recommended_template?.id || "");
+    } catch (err) {
+      setFigmaError(err instanceof ApiError ? err.message : "Không phân tích được file Figma.");
+    } finally {
+      setFigmaAnalyzing(false);
+    }
+  };
 
   useEffect(() => {
     if (!props.includeHulyUrl) return;
@@ -581,7 +690,7 @@ function CreateDialog(props: {
     setHulyError("");
     if (!value) {
       setHulyState("idle");
-      if (!nameEdited) setName("");
+      if (!nameEdited && !props.created) setName("");
       return;
     }
     let active = true;
@@ -591,7 +700,7 @@ function CreateDialog(props: {
         if (!active) return;
         setHulyMatch({ name: match.name, id: match.huly_id });
         setHulyState("resolved");
-        if (!nameEdited) setName(match.name);
+        if (!nameEdited && !props.created) setName(match.name);
       }).catch((err) => {
         if (!active) return;
         setHulyState("error");
@@ -603,30 +712,58 @@ function CreateDialog(props: {
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
+    const missingRequired = !name.trim() || !description.trim()
+      || (props.showDesignSetup && !editing && !designMode);
+    if (missingRequired) {
+      setValidationAttempted(true);
+      setError(props.showDesignSetup
+        ? "Vui lòng nhập tên, mô tả project và chọn cách thiết lập Design System."
+        : `Vui lòng nhập ${props.nameLabel?.toLowerCase() ?? "tên"} và mô tả.`);
+      setShakeMissing(true);
+      window.setTimeout(() => setShakeMissing(false), 500);
+      return;
+    }
     setBusy(true);
+    setBusyMessage(editing ? "Đang cập nhật project…" : "Đang tạo project…");
     setError("");
     try {
-      await props.onSubmit(name.trim(), description.trim(), hulyUrl.trim());
+      const updating = editing;
+      await props.onSubmit(name.trim(), description.trim(), hulyUrl.trim(), designMode || undefined, figmaFile || undefined, selectedTemplateId || undefined, figmaAnalysis?.has_template, setBusyMessage);
+      if (!updating) setEditing(true);
+      if (updating) setSuccessMessage("Thông tin project đã được cập nhật.");
+      setBusy(false);
+      setBusyMessage("");
+
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Không tạo được");
       setBusy(false);
+      setBusyMessage("");
     }
   };
 
   return (
-    <Modal title={props.title} onClose={props.onClose} wide={props.includeHulyUrl}>
-      <form className="form" onSubmit={submit}>
+    <Modal title={editing ? "Cập nhật dự án" : props.title} onClose={props.onClose} wide={props.includeHulyUrl} sideBySide={editing} adjacent={showFigmaAgent}
+      sidePanel={showFigmaAgent ? <FigmaAgentPanel
+        projectName={name.trim() || "Dự án mới"} file={figmaFile} analysis={figmaAnalysis} loading={figmaAnalyzing}
+        error={figmaError} selectedTemplateId={selectedTemplateId}
+        dragOver={figmaDragOver} inputRef={figmaInputRef}
+        onPick={() => figmaInputRef.current?.click()} onFile={analyzeFigmaFile}
+        onSelectTemplate={setSelectedTemplateId}
+        onContinue={() => createFormRef.current?.requestSubmit()}
+        onDrag={setFigmaDragOver} onClose={() => setDesignMode("")}
+      /> : undefined}>
+      <form ref={createFormRef} className="form" onSubmit={submit}>
         <label>
           {props.nameLabel ?? "Tên"}
-          <input value={name} onChange={(e) => { setName(e.target.value); setNameEdited(true); }} required maxLength={200} autoFocus placeholder={props.includeHulyUrl ? "Ví dụ: FastGo Mobile" : undefined} />
+          <input className={validationAttempted && !name.trim() ? `field-invalid${shakeMissing ? " shake-missing" : ""}` : ""} value={name} onChange={(e) => { setName(e.target.value); setNameEdited(true); setSuccessMessage(""); setError(""); }} maxLength={200} aria-required="true" autoFocus placeholder={props.includeHulyUrl ? "Ví dụ: FastGo Mobile" : undefined} />
         </label>
         <label>
           Mô tả
-          <textarea value={description} onChange={(e) => setDescription(e.target.value)} maxLength={2000} rows={3} />
+          <textarea className={validationAttempted && !description.trim() ? `field-invalid${shakeMissing ? " shake-missing" : ""}` : ""} value={description} onChange={(e) => { setDescription(e.target.value); setSuccessMessage(""); setError(""); }} maxLength={2000} rows={3} aria-required="true" />
         </label>
         {props.includeHulyUrl && <>
           <label>Huly project URL <span className="optional-tag">Không bắt buộc</span>
-            <input type="url" value={hulyUrl} onChange={(e) => setHulyUrl(e.target.value)} placeholder="https://huly.example.com/..." maxLength={1000} />
+            <input type="url" value={hulyUrl} onChange={(e) => { setHulyUrl(e.target.value); setSuccessMessage(""); }} placeholder="https://huly.example.com/..." maxLength={1000} />
           </label>
           <section className="project-wiki-preview" aria-label="Project Wiki sẽ được khởi tạo">
             <div className="project-wiki-title"><span className="wiki-book"><BookOpen size={20} /></span><div><strong>Project Wiki tự động</strong><small>Một vùng tri thức riêng cho project, dùng chung bởi BA và Designer.</small></div></div>
@@ -637,12 +774,32 @@ function CreateDialog(props: {
           </section>
           {hulyState === "error" && <div className="alert">{hulyError}</div>}
         </>}
+        {props.showDesignSetup && <fieldset aria-required={!editing} className={`project-design-setup${validationAttempted && !editing && !designMode ? ` field-invalid${shakeMissing ? " shake-missing" : ""}` : ""}`} disabled={editing}>
+          <legend>Thiết lập Design System</legend>
+          <p>Dùng chung làm nền tảng thiết kế cho các feature trong project.</p>
+          <div className="project-design-options">
+            {([
+              ["figma", "Từ file Figma", "Đã có thiết kế hoặc bộ nhận diện"],
+              ["qa", "Chat với Design System Agent", "Agent dùng mô tả project, hỏi phần còn thiếu và dựng UI mẫu"],
+              ["later", "Để sau", "Thiết lập trong project sau"],
+            ] as ["figma" | "qa" | "later", string, string][]).map(([value, label, detail]) => (
+              <label className={`project-design-choice${designMode === value ? " selected" : ""}`} key={value}>
+                <input type="radio" name="project-design-mode" value={value} checked={designMode === value} onChange={() => { setDesignMode(value); setError(""); }} />
+                <span><strong>{label}</strong><small>{detail}</small></span>
+              </label>
+            ))}
+          </div>
+        </fieldset>}
+        {showFigmaAgent && <div className="figma-create-hint"><FileUp size={14} /> Tải và kiểm tra file trong khung Agent bên phải trước khi tạo project.</div>}
         {error && <div className="alert">{error}</div>}
+        {successMessage && <div className="project-update-success"><Check size={15} />{successMessage}</div>}
         <p className="muted small">{props.note}</p>
         <div className="dialog-actions">
-          <button type="button" className="btn ghost" onClick={props.onClose}>Huỷ</button>
-          <button className="btn primary" disabled={!name.trim() || busy || hulyState === "loading" || (Boolean(hulyUrl.trim()) && hulyState !== "resolved")}>
-            {busy ? <span className="spinner sm" /> : props.submitLabel}
+          <button type="button" className="btn ghost" onClick={props.onClose}>{"H\u1ee7y"}</button>
+          <button className="btn primary" disabled={busy || hulyState === "loading" || (Boolean(hulyUrl.trim()) && hulyState !== "resolved")
+            || (showFigmaAgent && (figmaAnalyzing || !figmaAnalysis || (figmaAnalysis.has_template && !selectedTemplateId)))}>
+            {busy ? <><span className="spinner sm" />{busyMessage && <span>{busyMessage}</span>}</> : editing ? "Cập nhật dự án"
+              : showFigmaAgent && figmaAnalysis && !figmaAnalysis.has_template ? "Tạo dự án & chat với Agent" : props.submitLabel}
           </button>
         </div>
       </form>
@@ -650,21 +807,106 @@ function CreateDialog(props: {
   );
 }
 
-function Modal({ title, onClose, children, wide }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
+function FigmaAgentPanel({
+  projectName, file, analysis, loading, error, selectedTemplateId, dragOver, inputRef,
+  onPick, onFile, onSelectTemplate, onContinue, onDrag, onClose,
+}: {
+  projectName: string; file: File | null; analysis: FigmaAnalysis | null; loading: boolean; error: string;
+  selectedTemplateId: string; dragOver: boolean; inputRef: { current: HTMLInputElement | null };
+  onPick: () => void; onFile: (file: File | null) => void; onSelectTemplate: (id: string) => void;
+  onContinue: () => void; onDrag: (value: boolean) => void; onClose: () => void;
+}) {
+  const eligible = analysis?.template_candidates.filter((item) => item.looks_like_template) ?? [];
+  const chosen = analysis?.template_candidates.find((item) => item.id === selectedTemplateId)
+    || analysis?.recommended_template || null;
+  return <aside className="figma-agent-panel" aria-label="Figma Design System Agent">
+    <header className="figma-agent-head">
+      <span className="figma-agent-icon"><Sparkles size={19} /></span>
+      <div><strong>Figma Design System Agent</strong><small>{projectName} · Thiết lập giao diện dùng chung cho project</small></div>
+      <button className="icon-btn" type="button" onClick={onClose} aria-label="Đóng Agent"><X size={16} /></button>
+    </header>
+    <div className="figma-agent-context"><MessagesSquare size={14} /> Agent kiểm tra file trước khi tạo dự án; kết quả phân tích chưa được lưu cho tới khi bạn tiếp tục.</div>
+    <div className="figma-agent-content">
+      <div className="figma-agent-message"><span className="figma-agent-avatar"><Sparkles size={13} /></span><div>
+        {file ? `Mình đang kiểm tra ${file.name}: styles, components và các frame màn hình.` : "Tải file thiết kế Figma để mình kiểm tra styles, components và xem file đã có màn hình mẫu dùng chung chưa nhé."}
+      </div></div>
+      <section className={`figma-upload-card${dragOver ? " drag-over" : ""}`} onDragOver={(event) => { event.preventDefault(); onDrag(true); }}
+        onDragLeave={() => onDrag(false)} onDrop={(event) => { event.preventDefault(); onDrag(false); onFile(event.dataTransfer.files[0] || null); }}>
+        <div className="figma-section-title"><FileUp size={16} /><strong>File Figma của project</strong>
+          {loading && <span className="figma-status working"><i className="spinner sm" /> Đang phân tích</span>}
+          {analysis && !loading && <span className="figma-status ready"><Check size={13} /> Đã phân tích</span>}
+        </div>
+        {!file && <div className="figma-dropzone"><UploadCloud size={29} /><strong>Kéo thả file .fig vào đây</strong><span>hoặc</span>
+          <button type="button" className="btn primary sm" onClick={onPick}>Chọn file .fig</button><small>Tối đa 100 MB · Figma → Save local copy</small></div>}
+        <input ref={inputRef} type="file" accept=".fig,application/octet-stream" hidden onChange={(event) => onFile(event.target.files?.[0] || null)} />
+        {file && <div className="figma-file-row"><FileJson size={17} /><strong title={file.name}>{file.name}</strong><span>{(file.size / 1024 / 1024).toFixed(1)} MB</span>
+          <button className="btn ghost sm" type="button" disabled={loading} onClick={() => { onFile(null); if (inputRef.current) inputRef.current.value = ""; }}>Đổi file</button></div>}
+        {error && <div className="figma-inline-error"><CircleAlert size={14} />{error}</div>}
+      </section>
+      {!analysis && !loading && !error && <section className="figma-agent-waiting">
+        <span><Sparkles size={19} /></span>
+        <h3>Agent sẽ kiểm tra file trước khi tạo project</h3>
+        <p>Sau khi tải file lên, mình sẽ đọc styles và components, tìm màn hình có thể dùng làm template, rồi cho bạn xem trước để chọn.</p>
+        <ol>
+          <li><b>Phân tích</b><small>Styles, typography và components</small></li>
+          <li><b>Kiểm tra template</b><small>Tìm màn hình mẫu đã có trong file</small></li>
+          <li><b>Đưa ra bước tiếp theo</b><small>Chọn template có sẵn hoặc tạo mới</small></li>
+        </ol>
+      </section>}
+      {loading && <div className="figma-analysis-loading"><span className="spinner" /> Agent đang đọc cấu trúc Figma và đối chiếu màn hình mẫu…</div>}
+      {analysis && <>
+        <div className="figma-analysis-stats">
+          <span><Layers size={15} /><b>{(analysis.summary.colors ?? 0) + (analysis.summary.texts ?? 0) + (analysis.summary.shadows ?? 0)}</b> styles</span>
+          <span><Boxes size={15} /><b>{analysis.component_count}</b> components</span>
+          <span><LayoutGrid size={15} /><b>{analysis.screen_count}</b> màn hình</span>
+        </div>
+        {analysis.has_template ? <section className="figma-template-result found">
+          <h3><Check size={16} /> Đã tìm thấy màn hình có thể dùng làm template</h3>
+          <p>Chọn màn hình có cấu trúc rõ để làm mẫu chung. Agent sẽ dùng lại token và component từ file, không tạo template trùng.</p>
+          {eligible.length > 1 && <div className="figma-template-list">{eligible.slice(0, 5).map((item) => <button type="button" key={item.id}
+            className={item.id === selectedTemplateId ? "selected" : ""} onClick={() => onSelectTemplate(item.id)}>
+            <span>{item.name}</span><small>{item.page} · {item.width}×{item.height}</small></button>)}</div>}
+          {chosen?.html && <div className="figma-preview-wrap"><iframe title={`Preview ${chosen.name}`} sandbox="allow-scripts" srcDoc={chosen.html} />
+            <div><strong>{chosen.name}</strong><small>{chosen.page} · Màn hình Figma được chọn làm template</small></div></div>}
+        </section> : <section className="figma-template-result missing">
+          <h3><CircleAlert size={16} /> Chưa tìm thấy template UI dùng chung</h3>
+          <p>File này có Design System và component library, nhưng chưa có màn hình UI hoàn chỉnh. Sau khi tạo project, Agent sẽ mở chat dựa trên tên project, mô tả và các component vừa đọc; Agent hỏi phần còn thiếu, dựng các mẫu UI để bạn chọn rồi lưu template đã duyệt vào Project Wiki.</p>
+          <button type="button" className="btn primary figma-continue-btn" onClick={onContinue}>
+            <MessagesSquare size={15} /> Tạo dự án và mở chat với Agent
+          </button>
+        </section>}
+        {!!analysis.unresolved.length && <details className="figma-unresolved"><summary>{analysis.unresolved.length} mục Figma cần làm rõ</summary>
+          <ul>{analysis.unresolved.slice(0, 8).map((item, index) => <li key={`${item.kind}-${index}`}>{item.node_name ? `${item.node_name}: ` : ""}{item.question}</li>)}</ul>
+        </details>}
+      </>}
+    </div>
+    <footer className="figma-agent-footer"><FileUp size={13} /> Token, component và template sẽ được lưu vào Wiki sau khi tạo project.</footer>
+  </aside>;
+}
+
+function Modal({ title, onClose, children, wide, sideBySide, adjacent, sidePanel }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean; sideBySide?: boolean; adjacent?: boolean; sidePanel?: ReactNode }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
   return (
-    <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className={`dialog ${wide ? "wide" : ""}`} role="dialog" aria-label={title}>
+    <div className={`overlay${sideBySide ? " project-create-overlay" : ""}${adjacent ? " figma-create-overlay" : ""}`} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      {adjacent ? <div className="figma-create-layout">
+        <div className="figma-create-modal">
+          <div className={`dialog ${wide ? "wide" : ""}`} role="dialog" aria-label={title}>
+            <div className="dialog-head"><h2>{title}</h2><button className="icon-btn" onClick={onClose} aria-label="Đóng"><X size={16} /></button></div>
+            {children}
+          </div>
+        </div>
+        {sidePanel}
+      </div> : <div className={`dialog ${wide ? "wide" : ""}${sideBySide ? " project-create-dialog" : ""}`} role="dialog" aria-label={title}>
         <div className="dialog-head">
           <h2>{title}</h2>
           <button className="icon-btn" onClick={onClose} aria-label="Đóng"><X size={16} /></button>
         </div>
         {children}
-      </div>
+      </div>}
     </div>
   );
 }
@@ -675,14 +917,18 @@ type Tab = "features" | "assets" | "workspace" | "members";
 
 function ProjectPage({
   projectId,
+  refreshKey,
   me,
   onBack,
   onOpenFeature,
+  onOpenDesignSystem,
 }: {
   projectId: string;
+  refreshKey: number;
   me: User;
   onBack: () => void;
   onOpenFeature: (fid: string) => void;
+  onOpenDesignSystem: (id: string, name: string, description: string, hulyUrl?: string) => void;
 }) {
   const [project, setProject] = useState<ProjectDetail | null>(null);
   const [error, setError] = useState("");
@@ -692,7 +938,7 @@ function ProjectPage({
   const load = useCallback(() => {
     api.project(projectId).then(setProject).catch((e) => setError(String(e.message ?? e)));
   }, [projectId]);
-  useEffect(load, [load]);
+  useEffect(load, [load, refreshKey]);
 
   const crumbs: Crumb[] = [{ label: "Dự án", to: "/" }, { label: project?.name ?? "…" }];
 
@@ -733,6 +979,9 @@ function ProjectPage({
                     <span className="mono" title="Mã dự án">{project.id}</span>
                   </div>
                 </div>
+                <button className="btn project-design-launch" type="button" onClick={() => onOpenDesignSystem(project.id, project.name, project.description, project.huly_url)}>
+                  <Sparkles size={15} /> <span>Design System Agent</span>
+                </button>
               </div>
 
               <nav className="tabs">
