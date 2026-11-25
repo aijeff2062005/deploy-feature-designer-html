@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, canvasUrl } from "./api";
+import { api } from "./api";
+import { CanvasApp } from "./canvas/CanvasApp";
+import "./canvas/canvas.css";
 import { BuildRail } from "./BuildRail";
 import { ChatWorkspace } from "./ChatWorkspace";
 import { openRunStream } from "./events";
@@ -26,6 +28,8 @@ export default function App() {
     const [reviewOpen, setReviewOpen] = useState(false);
     const [rightPanel, setRightPanel] = useState<"workbench" | "files" | "wiki">("workbench");
     const [screensVersion, setScreensVersion] = useState(0);
+    const [canvasOpen, setCanvasOpen] = useState(false);
+    const [canvasScreenId, setCanvasScreenId] = useState<string>();
     const [notice, setNotice] = useState("");
     const { resolvedTheme, toggleTheme } = useTheme();
     const historyPreviewRunKey = useMemo(
@@ -218,11 +222,15 @@ export default function App() {
     };
 
     const openCanvas = activeSession
-        ? () => window.open(canvasUrl(activeSession.id), `designer-canvas-${activeSession.id}`)
+        ? (screenId?: string) => {
+              setCanvasScreenId(screenId);
+              setReviewOpen(false);
+              setCanvasOpen(true);
+          }
         : undefined;
 
     return (
-        <div className={`app-shell ${collapsed ? "rail-collapsed" : ""} ${reviewOpen ? "" : "review-closed"}`}>
+        <div className={`app-shell ${collapsed ? "rail-collapsed" : ""} ${reviewOpen ? "" : "review-closed"} ${canvasOpen ? "canvas-open" : ""}`}>
             <SessionRail
                 sessions={sessions}
                 activeId={activeSession?.id}
@@ -243,7 +251,8 @@ export default function App() {
                 onTheme={toggleTheme}
                 onReview={() => setReviewOpen(!reviewOpen)}
                 onSettings={() => setSettingsOpen(true)}
-                onOpenCanvas={openCanvas}
+                onOpenCanvas={canvasOpen ? () => setCanvasOpen(false) : openCanvas}
+                canvasOpen={canvasOpen}
             />
 
             <section className="timeline-slot">
@@ -254,7 +263,9 @@ export default function App() {
                 />
             </section>
 
-            <ChatWorkspace
+            {canvasOpen && <CanvasApp key={activeSession?.id} onBack={() => setCanvasOpen(false)} initialScreenId={canvasScreenId} />}
+
+            {!canvasOpen && <ChatWorkspace
                 run={activeRun}
                 runs={runs}
                 events={events}
@@ -284,9 +295,9 @@ export default function App() {
                         setNotice((error as Error).message);
                     }
                 }}
-            />
+            />}
 
-            {reviewOpen && rightPanel === "workbench" && (
+            {!canvasOpen && reviewOpen && rightPanel === "workbench" && (
                 <ReviewPanel
                     run={activeRun}
                     sessionId={activeSession?.id}
@@ -294,12 +305,13 @@ export default function App() {
                     screensVersion={screensVersion}
                     onReview={review}
                     onShowFiles={() => setRightPanel("files")}
+                    onOpenCanvas={openCanvas ?? (() => undefined)}
                 />
             )}
-            {reviewOpen && rightPanel === "files" && (
+            {!canvasOpen && reviewOpen && rightPanel === "files" && (
                 <ProjectFilesPanel onShowWorkbench={() => setRightPanel("workbench")} onShowWiki={() => setRightPanel("wiki")} />
             )}
-            {reviewOpen && rightPanel === "wiki" && (
+            {!canvasOpen && reviewOpen && rightPanel === "wiki" && (
                 <ProjectDesignWikiPanel
                     projectId={activeSession?.project_id ?? undefined}
                     sessionId={activeSession?.id}

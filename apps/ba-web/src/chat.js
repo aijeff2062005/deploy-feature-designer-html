@@ -1648,6 +1648,7 @@ function renderWorkspace() {
     const actorsList = data.actors || [];
     const scopeInList = data.scope_in || [];
     const scopeOutList = data.scope_out || [];
+    const screenSpecs = Array.isArray(data.screen_specs) ? [...data.screen_specs].sort((a, b) => Number(a.sequence || 0) - Number(b.sequence || 0)) : [];
     const continuity = data.continuity || {};
     const handoffs = Array.isArray(continuity.handoffs) ? continuity.handoffs : [];
     const incomingHandoffs = Array.isArray(continuity.incoming_handoffs) ? continuity.incoming_handoffs : [];
@@ -1694,6 +1695,22 @@ function renderWorkspace() {
         `</div>`;
     };
 
+    const renderSpecLines = (values) => Array.isArray(values) ? values.filter(Boolean).map(value => `<li>${escapeHtml(value)}</li>`).join('') : '';
+    const screenSpecsPanel = screenSpecs.length ? `
+      <details class="field-group fd-screen-specs">
+        <summary><span class="field-label">Đặc tả chi tiết ${screenSpecs.length} màn hình</span><span class="count-pill">${screenSpecs.length}</span></summary>
+        <div class="fd-screen-spec-list">${screenSpecs.map((screen, index) => `
+          <article class="ws-item-card fd-screen-spec">
+            <div class="ws-item-header"><strong>${Number(screen.sequence) || index + 1}. ${escapeHtml(screen.name || screen.screen_id || 'Màn hình')}</strong><code>${escapeHtml(screen.screen_id || '')}</code></div>
+            ${screen.platform ? `<div class="ws-item-body"><strong>Viewport:</strong> ${escapeHtml(screen.platform)}</div>` : ''}
+            ${screen.purpose ? `<div class="ws-item-body"><strong>Mục đích:</strong> ${escapeHtml(screen.purpose)}</div>` : ''}
+            ${[['sections','Khối giao diện'],['actions','Hành động & điều hướng'],['states','Trạng thái & lỗi'],['rules','Quy tắc'],['data_contract','Dữ liệu vào/ra'],['notes','Ràng buộc']].map(([key,label]) => {
+              const content = renderSpecLines(screen[key]);
+              return content ? `<div class="fd-screen-spec-section"><strong>${label}</strong><ul>${content}</ul></div>` : '';
+            }).join('')}
+          </article>`).join('')}</div>
+      </details>` : '';
+
     wsEl.innerHTML = `
       ${memoryPanel}
       <div class="field-group">
@@ -1714,6 +1731,7 @@ function renderWorkspace() {
         </div>
         ${renderChips(scopeInList, 'scope_in', 'chip-emerald')}
       </div>
+      ${screenSpecsPanel}
       <div class="field-group">
         <div style="display: flex; justify-content: space-between; align-items: center;">
           <label class="field-label">Phạm vi ngoại trừ (Scope Out)</label>

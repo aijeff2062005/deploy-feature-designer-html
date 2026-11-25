@@ -29,7 +29,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { useTheme } from "../theme";
-import type { Screen, ScreenVersion } from "../types";
+import type { Run, Screen, ScreenVersion } from "../types";
 
 const params = new URLSearchParams(window.location.search);
 const SESSION = params.get("session") || "";
@@ -40,6 +40,7 @@ const PLATFORMS: Record<string, { label: string; icon: typeof Monitor }> = {
     desktop: { label: "Desktop", icon: Monitor },
 };
 const POLL_MS = 3000;
+const SCREEN_EDIT_MARKER = /^\[\[DESIGNER_SCREEN_EDIT:([^\]]+)\]\]\s*/;
 
 type FigLayout = "rows" | "pages";
 const LAYOUT_KEY = "designer.figLayout";
@@ -126,9 +127,9 @@ type ScreenMessage =
     | { source: "designer-screen"; type: "goto"; screen: string }
     | { source: "designer-screen"; type: "select"; element: { id: string; tag: string; text: string; html: string } };
 
-export function CanvasApp() {
+export function CanvasApp({ onBack, initialScreenId }: { onBack?: () => void; initialScreenId?: string }) {
     useTheme();
-    return DESIGN_SYSTEM ? <Gallery id={DESIGN_SYSTEM} /> : SESSION ? <ScreensCanvas /> : <p className="canvas-empty">Thiếu session.</p>;
+    return DESIGN_SYSTEM ? <Gallery id={DESIGN_SYSTEM} /> : SESSION ? <ScreensCanvas onBack={onBack} initialScreenId={initialScreenId} /> : <p className="canvas-empty">Thiếu session.</p>;
 }
 
 function Frame({
@@ -287,6 +288,45 @@ function noScrollDoc(doc: string): string {
     return doc.includes("</head>") ? doc.replace("</head>", `${tag}</head>`) : tag + doc;
 }
 
+function ScreenThumbnail({ screen, index }: { screen: Screen; index: number }) {
+    const box = useRef<HTMLSpanElement>(null);
+    const [doc, setDoc] = useState("");
+    const [boxWidth, setBoxWidth] = useState(120);
+    const platform = PLATFORMS[screen.platform] ?? PLATFORMS.desktop;
+    const frameHeight = screen.platform === "mobile" ? 844 : screen.platform === "tablet" ? 1024 : 900;
+
+    useEffect(() => {
+        let active = true;
+        setDoc("");
+        api.screenDocument(SESSION, screen.id).then((html) => { if (active) setDoc(html); }).catch(() => undefined);
+        return () => { active = false; };
+    }, [screen.id, screen.version]);
+
+    useEffect(() => {
+        const element = box.current;
+        if (!element) return;
+        const observer = new ResizeObserver(() => setBoxWidth(element.clientWidth));
+        observer.observe(element);
+        setBoxWidth(element.clientWidth);
+        return () => observer.disconnect();
+    }, []);
+
+    const scale = screen.platform === "mobile"
+        ? boxWidth / screen.width
+        : Math.min(boxWidth / screen.width, 132 / frameHeight);
+    return (
+        <span className="canvas-screen-thumb" ref={box}>
+            {doc ? (
+                <span className="canvas-screen-thumb-content" style={{ width: screen.width * scale, height: frameHeight * scale }}>
+                    <iframe title={screen.name} sandbox="allow-scripts allow-forms" srcDoc={noScrollDoc(doc)}
+                        style={{ width: screen.width, height: frameHeight, transform: `scale(${scale})` }} />
+                </span>
+            ) : <span className="canvas-screen-thumb-fallback"><platform.icon size={18} /></span>}
+            <span className="canvas-screen-number">{index + 1}</span>
+        </span>
+    );
+}
+
 /** One screen preview in the sequence overview. */
 function StateFrame({
     doc, w, h: defaultH, index, screenId, screenName, zoom, active, onClick,
@@ -333,7 +373,7 @@ const OVERVIEW_CARD_WIDTH = 280;
 const OVERVIEW_GAP = 24;
 
 /** Horizontal overview — one numbered card per screen, in flow order. */
-function MultiView({ screens, selectedId, onSelect }: { screens: Screen[]; selectedId: string; onSelect: (id: string) => void }) {
+function MultiView({ screens, selectedId, onSelect, layout = "flow" }: { screens: Screen[]; selectedId: string; onSelect: (id: string) => void; layout?: "flow" | "selected" }) {
     const [docs, setDocs] = useState<Record<string, string>>({});
     const [zoom, setZoom] = useState(0.42);
     const containerRef = useRef<HTMLDivElement>(null);
@@ -362,21 +402,33 @@ function MultiView({ screens, selectedId, onSelect }: { screens: Screen[]; selec
         setZoom((z) => Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.round((z + delta) * 100) / 100)));
 
     const fitAll = () => {
-        const viewport = containerRef.current?.querySelector(".canvas-multi") as HTMLDivElement | null;
+        const viewport = containerRef.current?.querySelector(".canvas-flow-scroll") as HTMLDivElement | null;
         if (!viewport || !screens.length) return;
-        const available = Math.max(240, viewport.clientWidth - 40);
+        const available = Math.max(240, viewport.clientWidth - 48);
         const baseWidths = orderedScreens.map((screen) => Math.min(screen.width || 390, 300));
         const connectorWidth = 22;
-        const fit = (available - (OVERVIEW_GAP + connectorWidth) * (screens.length - 1)) / baseWidths.reduce((sum, width) => sum + width, 0);
+        const gap = layout === "selected" ? 16 : OVERVIEW_GAP + connectorWidth;
+        const fit = (available - gap * (screens.length - 1)) / baseWidths.reduce((sum, width) => sum + width, 0);
         setZoom(Math.max(ZOOM_MIN, Math.min(1, Math.round(fit * 100) / 100)));
     };
 
     const orderedScreens = [...screens].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+    const screenKey = orderedScreens.map((item) => item.id).join(",");
+
+    useEffect(() => {
+        if (layout !== "selected" || orderedScreens.length < 2) return;
+        const viewport = containerRef.current?.querySelector(".canvas-flow-scroll");
+        if (!viewport) return;
+        const observer = new ResizeObserver(() => fitAll());
+        observer.observe(viewport);
+        requestAnimationFrame(() => fitAll());
+        return () => observer.disconnect();
+    }, [layout, screenKey]);
 
     return (
-        <div className="canvas-flow-wrap" ref={containerRef}>
+        <div className={`canvas-flow-wrap ${layout === "selected" ? "canvas-selection-preview" : ""}`} ref={containerRef}>
             <div className="canvas-flow-toolbar">
-                <div className="canvas-flow-device"><Smartphone size={15} /><span>{PLATFORMS[orderedScreens[0]?.platform ?? "mobile"]?.label ?? "Mobile"} · {orderedScreens[0]?.width ?? 390} × {orderedScreens[0]?.platform === "mobile" ? 844 : 900}</span></div>
+                <div className="canvas-flow-device">{layout === "selected" ? <><Columns2 size={15} /><span>{orderedScreens.length} màn hình đang chọn · chỉnh sửa riêng từng màn</span></> : <><Smartphone size={15} /><span>{PLATFORMS[orderedScreens[0]?.platform ?? "mobile"]?.label ?? "Mobile"} · {orderedScreens[0]?.width ?? 390} × {orderedScreens[0]?.platform === "mobile" ? 844 : 900}</span></>}</div>
                 <div className="canvas-zoom-bar">
                 <button className="canvas-icon" onClick={() => changeZoom(-ZOOM_STEP)} disabled={zoom <= ZOOM_MIN} type="button" title="Thu nhỏ (Ctrl+scroll)"><Minus size={14} /></button>
                 <span className="canvas-zoom-label">{Math.round(zoom * 100)}%</span>
@@ -406,7 +458,7 @@ function MultiView({ screens, selectedId, onSelect }: { screens: Screen[]; selec
                                     <div className="canvas-multi-loading" />
                                 </div>
                               </div>}
-                        {index < orderedScreens.length - 1 && <div className="canvas-flow-connector" aria-hidden="true"><ArrowRight size={16} /></div>}
+                        {layout === "flow" && index < orderedScreens.length - 1 && <div className="canvas-flow-connector" aria-hidden="true"><ArrowRight size={16} /></div>}
                     </div>;
                 })}
             </div>
@@ -415,10 +467,10 @@ function MultiView({ screens, selectedId, onSelect }: { screens: Screen[]; selec
     );
 }
 
-function ScreensCanvas() {
+function ScreensCanvas({ onBack, initialScreenId }: { onBack?: () => void; initialScreenId?: string }) {
     const { resolvedTheme, toggleTheme } = useTheme();
     const [screens, setScreens] = useState<Screen[]>([]);
-    const [current, setCurrent] = useState(params.get("screen") || "");
+    const [current, setCurrent] = useState(initialScreenId || params.get("screen") || "");
     const [doc, setDoc] = useState("");
     const [states, setStates] = useState<string[]>([]);
     const [state, setState] = useState("");
@@ -426,11 +478,20 @@ function ScreensCanvas() {
     const [testPanelOpen, setTestPanelOpen] = useState(false);
     const [codeOpen, setCodeOpen] = useState(false);
     const [code, setCode] = useState("");
+    const [codeScreenId, setCodeScreenId] = useState("");
     const [versions, setVersions] = useState<ScreenVersion[]>([]);
     const [version, setVersion] = useState<number>();
     const [toast, setToast] = useState("");
     const [viewMode, setViewMode] = useState<"single" | "multi">("single");
+    const [selectedIds, setSelectedIds] = useState<string[]>([]);
+    const [editRuns, setEditRuns] = useState<Run[]>([]);
+    const [editPrompt, setEditPrompt] = useState("");
+    const [editBusy, setEditBusy] = useState(false);
+    const [editPanelOpen, setEditPanelOpen] = useState(true);
+    const [editError, setEditError] = useState("");
+    const [syncLabel, setSyncLabel] = useState("Chat được đồng bộ");
     const frameRef = useRef<HTMLIFrameElement>(null);
+    const initialSelectionApplied = useRef(false);
 
     // Build the back-to-chat URL from the current page's query params.
     const backUrl = (() => {
@@ -444,6 +505,7 @@ function ScreensCanvas() {
     );
 
     const screen = screens.find((s) => s.id === current) ?? screens[0];
+    const codeScreen = screens.find((s) => s.id === codeScreenId) ?? screen;
     const width = screen?.width ?? 1440;
 
     const loadScreens = useCallback(async () => {
@@ -461,17 +523,53 @@ function ScreensCanvas() {
         return () => window.clearInterval(timer);
     }, [loadScreens]);
 
+    useEffect(() => {
+        if (!screens.length || initialSelectionApplied.current) return;
+        initialSelectionApplied.current = true;
+        const requestedId = initialScreenId || params.get("screen");
+        const initial = screens.find((item) => item.id === requestedId)
+            ?? screens.find((item) => item.id === current)
+            ?? screens[0];
+        if (initial) {
+            setCurrent(initial.id);
+            setCodeScreenId(initial.id);
+            setSelectedIds([initial.id]);
+        }
+    }, [screens, current, initialScreenId]);
+
+    const loadEditRuns = useCallback(async () => {
+        const items = await api.listRuns(SESSION);
+        setEditRuns(items.filter((run) => SCREEN_EDIT_MARKER.test(run.prompt)));
+    }, []);
+
+    useEffect(() => {
+        void loadEditRuns().catch(() => undefined);
+        const timer = window.setInterval(() => void loadEditRuns().catch(() => undefined), POLL_MS);
+        return () => window.clearInterval(timer);
+    }, [loadEditRuns]);
+
+    useEffect(() => {
+        if (!selectedIds.length) setEditPanelOpen(false);
+    }, [selectedIds.length]);
+
+    useEffect(() => {
+        const pending = editRuns.some((run) => run.status === "running" || run.status === "queued");
+        if (pending) setSyncLabel("Đang xử lý yêu cầu…");
+        else if (editRuns.length) setSyncLabel("Đã đồng bộ vào hội thoại Designer");
+    }, [editRuns]);
+
     // Reload the document when the screen, its latest version or the viewed version changes.
     useEffect(() => {
         if (!screen) return;
         let cancelled = false;
         api.screenDocument(SESSION, screen.id, version).then((d) => !cancelled && setDoc(d)).catch(() => undefined);
-        api.screenVersions(SESSION, screen.id).then((v) => !cancelled && setVersions(v)).catch(() => undefined);
-        if (codeOpen) api.getScreen(SESSION, screen.id, version).then((s) => !cancelled && setCode(s.html ?? ""));
+        const versionScreen = codeOpen ? codeScreen : screen;
+        if (versionScreen) api.screenVersions(SESSION, versionScreen.id).then((v) => !cancelled && setVersions(v)).catch(() => undefined);
+        if (codeOpen && codeScreen) api.getScreen(SESSION, codeScreen.id, version).then((s) => !cancelled && setCode(s.html ?? ""));
         return () => {
             cancelled = true;
         };
-    }, [screen?.id, screen?.version, version, codeOpen]);
+    }, [screen?.id, screen?.version, codeScreen?.id, codeScreen?.version, version, codeOpen]);
 
     useEffect(() => {
         setState("");
@@ -508,9 +606,9 @@ function ScreensCanvas() {
     }, [toast]);
 
     const saveCode = async () => {
-        if (!screen) return;
+        if (!codeScreen) return;
         try {
-            await api.saveScreen(SESSION, screen.id, { name: screen.name, platform: screen.platform, html: code, note: "manual edit" });
+            await api.saveScreen(SESSION, codeScreen.id, { name: codeScreen.name, platform: codeScreen.platform, html: code, note: "manual edit", expected_version: codeScreen.version });
             setVersion(undefined);
             await loadScreens();
             setToast("Đã lưu phiên bản mới");
@@ -519,9 +617,67 @@ function ScreensCanvas() {
         }
     };
 
+    const selectedScreens = screens.filter((item) => selectedIds.includes(item.id));
+    const pendingEdit = editRuns.some((run) => run.status === "running" || run.status === "queued");
+    const visibleEditRuns = editRuns.filter((run) => {
+        const match = run.prompt.match(SCREEN_EDIT_MARKER);
+        const ids = match?.[1].split(",").map((item) => item.split("@")[0]) ?? [];
+        return ids.some((id) => selectedIds.includes(id));
+    });
+
+    const submitScreenEdit = async () => {
+        if (!editPrompt.trim() || !selectedScreens.length || editBusy) return;
+        const targetText = selectedScreens.map((item) => `${item.id}@${item.version}`).join(",");
+        const prompt = `[[DESIGNER_SCREEN_EDIT:${targetText}]]\n${editPrompt.trim()}`;
+        setEditBusy(true);
+        setEditError("");
+        setSyncLabel("Đang đồng bộ hội thoại…");
+        try {
+            const run = await api.sendMessage(SESSION, {
+                content: prompt,
+                screen_name_hint: selectedScreens.length === 1 ? selectedScreens[0].name : `${selectedScreens.length} màn hình đã chọn`,
+                platform_hint: selectedScreens[0].platform,
+                library_ids: [],
+            });
+            setEditRuns((items) => [run, ...items.filter((item) => item.id !== run.id)]);
+            setEditPrompt("");
+            setSyncLabel("Đã đồng bộ vào hội thoại Designer");
+            void loadEditRuns();
+        } catch (error) {
+            setEditError((error as Error).message);
+            setSyncLabel("Chưa đồng bộ");
+        } finally {
+            setEditBusy(false);
+        }
+    };
+
+    const undoCurrentScreen = async () => {
+        if (!screen) return;
+        try {
+            const history = await api.screenVersions(SESSION, screen.id);
+            const previous = history.find((item) => item.version < screen.version);
+            if (!previous) {
+                setEditError("Chưa có phiên bản trước để hoàn tác.");
+                return;
+            }
+            const prior = await api.getScreen(SESSION, screen.id, previous.version);
+            await api.saveScreen(SESSION, screen.id, {
+                name: screen.name, platform: screen.platform, html: prior.html ?? "",
+                note: `Hoàn tác về v${previous.version}`, expected_version: screen.version,
+            });
+            setVersion(undefined);
+            await loadScreens();
+            await loadEditRuns();
+            setEditError("");
+            setToast(`Đã hoàn tác màn hình về nội dung v${previous.version}`);
+        } catch (error) {
+            setEditError((error as Error).message);
+        }
+    };
+
     if (!screens.length) {
         return (
-            <div className="canvas-shell">
+                    <div className={`canvas-shell ${onBack ? "canvas-shell-embedded" : ""}`}>
                 <div className="canvas-empty">
                     <Brand subtitle="Trang thiết kế" />
                     <p>Chưa có màn hình nào. Agent sẽ dựng màn hình sau khi bạn duyệt spec; trang này tự cập nhật.</p>
@@ -533,17 +689,23 @@ function ScreensCanvas() {
     const platform = PLATFORMS[screen?.platform ?? ""] ?? PLATFORMS.desktop;
 
     return (
-        <div className="canvas-shell">
+        <div className={`canvas-shell ${onBack ? "canvas-shell-embedded" : ""}`}>
             <aside className="canvas-rail">
-                <div className="canvas-rail-top">
+                {!onBack && <div className="canvas-rail-top">
                     <Brand subtitle="Trang thiết kế" />
                     <a className="canvas-icon canvas-rail-back" href={backUrl} title="Về khung chat" aria-label="Về khung chat">
                         <ArrowLeft size={15} />
                     </a>
-                </div>
+                </div>}
                 <div className={`canvas-rail-label ${viewMode === "multi" ? "canvas-rail-label-flow" : ""}`}>
-                    <span>Màn hình</span>
+                    <span>Danh sách màn hình</span>
                     <span className="canvas-count">{screens.length}</span>
+                </div>
+                <div className="canvas-view-tabs" role="tablist" aria-label="Chế độ thiết kế">
+                    <button className={viewMode === "single" ? "active" : ""} type="button" role="tab" aria-selected={viewMode === "single"}
+                        onClick={() => { setViewMode("single"); setCodeOpen(false); setSelecting(false); setTestPanelOpen(false); }}>Thiết kế màn hình</button>
+                    <button className={viewMode === "multi" ? "active" : ""} type="button" role="tab" aria-selected={viewMode === "multi"}
+                        onClick={() => { setViewMode("multi"); setCodeOpen(false); setSelecting(false); setTestPanelOpen(false); }}>Prototype</button>
                 </div>
                 {viewMode === "multi" && <nav className="canvas-flow-nav" aria-label="Điều hướng flow">
                     <button className="canvas-flow-nav-overview active" type="button" aria-current="page">
@@ -555,28 +717,51 @@ function ScreensCanvas() {
                     {[...screens].sort((a, b) => (a.position ?? 0) - (b.position ?? 0)).map((s, index) => {
                         const p = PLATFORMS[s.platform] ?? PLATFORMS.desktop;
                         return (
-                            <button
-                                key={s.id}
-                                className={`canvas-screen ${s.id === screen?.id ? "active" : ""} ${viewMode === "multi" ? "canvas-flow-screen-link" : ""}`}
-                                onClick={() => {
-                                    setCurrent(s.id);
-                                    if (viewMode === "multi") {
-                                        const target = Array.from(document.querySelectorAll<HTMLElement>("[data-screen-id]"))
-                                            .find((item) => item.dataset.screenId === s.id);
-                                        target?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
-                                    }
-                                }}
-                                aria-current={s.id === screen?.id ? "page" : undefined}
-                                type="button"
-                            >
-                                <span className="canvas-screen-icon">{viewMode === "multi" ? <span className="canvas-flow-screen-number">{index + 1}</span> : <p.icon size={16} />}</span>
-                                <span className="canvas-screen-text">
-                                    <strong>{s.name}</strong>
-                                    <small>
-                                        {viewMode === "multi" ? p.label : `${p.label} · v${s.version}`}
-                                    </small>
-                                </span>
-                            </button>
+                            <div key={s.id} className="canvas-screen-row">
+                                <button
+                                    className={`canvas-screen ${s.id === screen?.id ? "active" : ""} ${viewMode === "multi" ? "canvas-flow-screen-link" : ""}`}
+                                    onClick={() => {
+                                        setCurrent(s.id);
+                                        setCodeScreenId(s.id);
+                                        if (viewMode === "multi") {
+                                            const target = Array.from(document.querySelectorAll<HTMLElement>("[data-screen-id]"))
+                                                .find((item) => item.dataset.screenId === s.id);
+                                            target?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+                                        }
+                                    }}
+                                    aria-current={s.id === screen?.id ? "page" : undefined}
+                                    type="button"
+                                >
+                                    {viewMode === "multi" ? <span className="canvas-screen-icon"><span className="canvas-flow-screen-number">{index + 1}</span></span> : (
+                                        <ScreenThumbnail screen={s} index={index} />
+                                    )}
+                                    <span className="canvas-screen-text">
+                                        <strong>{s.name}</strong>
+                                        <small>{viewMode === "multi" ? p.label : `${p.label} · v${s.version}`}</small>
+                                    </span>
+                                </button>
+                                <button
+                                    className={`canvas-screen-check ${selectedIds.includes(s.id) ? "selected" : ""}`}
+                                    type="button"
+                                    aria-label={`${selectedIds.includes(s.id) ? "Bỏ chọn" : "Chọn"} ${s.name} để chỉnh sửa bằng chat`}
+                                    aria-pressed={selectedIds.includes(s.id)}
+                                    onClick={() => {
+                                        if (selectedIds.includes(s.id)) {
+                                            const remaining = selectedIds.filter((id) => id !== s.id);
+                                            setSelectedIds(remaining);
+                                            if (current === s.id && remaining.length) setCurrent(remaining[0]);
+                                            if (codeScreenId === s.id && remaining.length) setCodeScreenId(remaining[0]);
+                                        } else {
+                                            setCurrent(s.id);
+                                            setCodeScreenId(s.id);
+                                            setSelectedIds((items) => [...items, s.id]);
+                                            setEditPanelOpen(true);
+                                        }
+                                    }}
+                                >
+                                    {selectedIds.includes(s.id) && <Check size={12} />}
+                                </button>
+                            </div>
                         );
                     })}
                 </nav>
@@ -587,24 +772,24 @@ function ScreensCanvas() {
                     <div className="canvas-title">
                         {viewMode === "multi"
                             ? <><h2>Flow overview</h2><span className="canvas-flow-crumb">/ {screens.length} màn hình · {screen?.name}</span></>
-                            : <><h2>{screen?.name}</h2><span className="canvas-chip"><platform.icon size={13} /> {platform.label} · {width}px</span></>
+                            : codeOpen && codeScreen
+                                ? <><h2>{codeScreen.name}</h2><span className="canvas-chip"><Code2 size={13} /> HTML · v{version ?? codeScreen.version}</span></>
+                                : selectedScreens.length > 1
+                                    ? <><h2>{selectedScreens.length} màn hình đang chọn</h2><span className="canvas-chip">Yêu cầu chat áp dụng riêng từng màn</span></>
+                                    : <><h2>{screen?.name}</h2><span className="canvas-chip"><platform.icon size={13} /> {platform.label} · {width}px</span></>
                         }
                     </div>
                     <div className="canvas-tools">
-                        <button
-                            className={`canvas-tool ${viewMode === "multi" ? "active" : ""}`}
-                            onClick={() => {
-                                setViewMode((mode) => mode === "single" ? "multi" : "single");
-                                setCodeOpen(false);
-                                setSelecting(false);
-                                setTestPanelOpen(false);
-                            }}
-                            type="button"
-                            aria-pressed={viewMode === "multi"}
-                            title={viewMode === "single" ? "Xem toàn bộ màn hình theo thứ tự" : "Quay lại chỉnh sửa một màn hình"}
-                        >
-                            <Columns2 size={15} /> {viewMode === "multi" ? "Màn đơn" : "Tổng quan"}
+                        <a className="canvas-back-chat" href={backUrl} onClick={onBack ? (event) => { event.preventDefault(); onBack(); } : undefined}>
+                            <ArrowLeft size={14} /> Quay lại chat
+                        </a>
+                        <button className="canvas-tool" type="button" onClick={() => {
+                            if (!selectedIds.length && screen) setSelectedIds([screen.id]);
+                            setEditPanelOpen((open) => !open);
+                        }} aria-expanded={editPanelOpen}>
+                            Chỉnh sửa bằng chat
                         </button>
+                        <span className="canvas-sync-status"><Check size={13} /> {syncLabel}</span>
                         {viewMode === "single" && <>
                             {states.length > 0 && (
                                 <div className="canvas-test-menu">
@@ -638,7 +823,7 @@ function ScreensCanvas() {
                                 title="Lịch sử phiên bản"
                                 value={version ?? ""}
                                 options={[
-                                    { value: "", label: `v${screen?.version} · mới nhất` },
+                                    { value: "", label: `v${(codeOpen ? codeScreen : screen)?.version} · mới nhất` },
                                     ...versions.slice(1).map((v) => ({ value: v.version, label: `v${v.version} · ${v.note || v.updated_by || ""}` })),
                                 ]}
                                 onChange={(v) => setVersion(v ? Number(v) : undefined)}
@@ -668,28 +853,87 @@ function ScreensCanvas() {
                     </div>
                 </header>
                 <div className={`canvas-body ${codeOpen && viewMode === "single" ? "with-code" : ""}`}>
-                    {viewMode === "multi"
-                        ? <MultiView screens={screens} selectedId={screen?.id ?? ""} onSelect={(id) => { setCurrent(id); setState(""); setVersion(undefined); setViewMode("single"); }} />
-                        : doc && <Frame doc={doc} width={width} onMessage={onMessage} frameRef={frameRef} />
-                    }
-                    {codeOpen && (
+                    {codeOpen && viewMode === "single" ? (
                         <section className="canvas-code" aria-label="HTML của màn hình">
                             <header>
                                 <span>
-                                    <Code2 size={15} /> HTML · v{version ?? screen?.version}
+                                    <Code2 size={15} /> {codeScreen?.name} · HTML · v{version ?? codeScreen?.version}
                                 </span>
                                 <button className="canvas-icon" onClick={() => setCodeOpen(false)} type="button" title="Đóng">
                                     <X size={16} />
                                 </button>
                             </header>
+                            {selectedScreens.length > 1 && <nav className="canvas-code-tabs" role="tablist" aria-label="Màn hình đang chọn để sửa code">
+                                {selectedScreens.map((item) => <button key={item.id} role="tab" aria-selected={codeScreen?.id === item.id} className={codeScreen?.id === item.id ? "active" : ""} type="button" onClick={() => { setCodeScreenId(item.id); setCurrent(item.id); setVersion(undefined); }}>
+                                    <span>#{item.position + 1}</span>{item.name}
+                                </button>)}
+                            </nav>}
                             <textarea value={code} onChange={(e) => setCode(e.target.value)} spellCheck={false} />
                             <button className="primary-button" onClick={() => void saveCode()} type="button">
-                                <Save size={15} /> Lưu thành phiên bản mới
+                                <Save size={15} /> Lưu phiên bản mới · {codeScreen?.name}
                             </button>
                         </section>
-                    )}
+                    ) : viewMode === "multi"
+                        ? <MultiView screens={screens} selectedId={screen?.id ?? ""} onSelect={(id) => { setCurrent(id); setCodeScreenId(id); setState(""); setVersion(undefined); setViewMode("single"); }} />
+                        : selectedScreens.length > 1
+                            ? <MultiView screens={selectedScreens} selectedId={screen?.id ?? ""} layout="selected" onSelect={(id) => { setCurrent(id); setCodeScreenId(id); setState(""); setVersion(undefined); }} />
+                            : doc && <Frame doc={doc} width={width} onMessage={onMessage} frameRef={frameRef} />
+                    }
                 </div>
             </main>
+            {editPanelOpen && selectedScreens.length > 0 && <aside className="canvas-edit-panel" aria-label="Chỉnh sửa màn hình bằng chat">
+                <header className="canvas-edit-header">
+                    <div><strong>Chỉnh sửa bằng chat</strong><small>Yêu cầu được lưu trong hội thoại Designer</small></div>
+                    <span className="canvas-edit-count">{selectedScreens.length} màn hình</span>
+                </header>
+                <section className="canvas-edit-targets">
+                    <strong>Phạm vi chỉnh sửa</strong>
+                    <p>{selectedScreens.length > 1 ? "Áp dụng riêng yêu cầu cho từng màn hình đã chọn." : selectedScreens.length === 1 ? "Chỉ áp dụng cho màn hình đang chọn." : "Chọn ít nhất một màn hình ở danh sách bên trái."}</p>
+                    <div className="canvas-edit-chips">
+                        {selectedScreens.map((item) => <span key={item.id}>#{item.position + 1} {item.name}</span>)}
+                    </div>
+                </section>
+                <form className="canvas-edit-form" onSubmit={(event) => { event.preventDefault(); void submitScreenEdit(); }}>
+                    <textarea value={editPrompt} onChange={(event) => setEditPrompt(event.target.value)}
+                        placeholder="Mô tả thay đổi cần thực hiện…" rows={4} disabled={editBusy || pendingEdit || !selectedScreens.length} />
+                    <div className="canvas-edit-form-footer">
+                        <span>Giữ nguyên bố cục và nội dung ngoài phạm vi yêu cầu.</span>
+                        <button className="primary-button" type="submit" disabled={!editPrompt.trim() || !selectedScreens.length || editBusy || pendingEdit}>
+                            {editBusy || pendingEdit ? "Đang xử lý…" : "Gửi yêu cầu"} <ArrowRight size={14} />
+                        </button>
+                    </div>
+                </form>
+                {editError && <div className="canvas-edit-error" role="alert">{editError}</div>}
+                <section className="canvas-edit-history">
+                    <div className="canvas-edit-history-title"><strong><History size={15} /> Lịch sử chỉnh sửa</strong>
+                        <button type="button" onClick={() => void undoCurrentScreen()} disabled={!screen || !versions.some((item) => item.version < (screen?.version ?? 0))}>
+                            <ArrowLeft size={13} /> Hoàn tác màn đang xem
+                        </button>
+                    </div>
+                    {!visibleEditRuns.length && <p className="canvas-edit-empty">Chưa có yêu cầu chỉnh sửa cho màn hình đang chọn.</p>}
+                    {visibleEditRuns.slice(0, 5).map((run) => {
+                        const cleanPrompt = run.prompt.replace(SCREEN_EDIT_MARKER, "").trim();
+                        const pending = run.status === "running" || run.status === "queued";
+                        const failed = run.status === "failed" || run.status === "blocked";
+                        return <article className="canvas-edit-history-item" key={run.id}>
+                            <div className={`canvas-edit-run-status ${failed ? "failed" : pending ? "pending" : "done"}`}>
+                                {pending ? "Đang xử lý" : failed ? "Không áp dụng được" : "Đã áp dụng"} · {new Date(run.created_at).toLocaleString()}
+                            </div>
+                            <p>{cleanPrompt}</p>
+                            {run.assistant_message && <small>{run.assistant_message}</small>}
+                            {failed && run.error?.detail && <small className="canvas-edit-run-error">{run.error.detail}</small>}
+                            {failed && run.error?.code === "SCREEN_VERSION_CONFLICT" && <button className="canvas-edit-reload" type="button" onClick={() => {
+                                void loadScreens().then(() => api.listScreens(SESSION)).then((items) => {
+                                    const targetId = run.prompt.match(SCREEN_EDIT_MARKER)?.[1].split(",")[0].split("@")[0];
+                                    if (targetId && items.some((item) => item.id === targetId)) setCurrent(targetId);
+                                    setVersion(undefined);
+                                    setEditError("Màn hình đã được cập nhật phiên bản mới. Hãy kiểm tra nội dung mới trước khi gửi lại yêu cầu.");
+                                }).catch((error) => setEditError((error as Error).message));
+                            }}>Tải phiên bản mới</button>}
+                        </article>;
+                    })}
+                </section>
+            </aside>}
             {toast && <div className="canvas-toast">{toast}</div>}
         </div>
     );

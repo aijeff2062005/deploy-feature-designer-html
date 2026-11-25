@@ -1612,6 +1612,13 @@ body.platform-embed .tb-standalone { display: none !important; }
 .ws-item-card,
 .ws-seg { border: 0 !important; }
 .ws-item-card { background: var(--bg-surface-hover); border-radius: 12px; }
+.fd-screen-specs > summary { display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none; }
+.fd-screen-specs > summary::-webkit-details-marker { display: none; }
+.fd-screen-spec-list { display: grid; gap: 8px; margin-top: 9px; }
+.fd-screen-spec { padding: 10px; }
+.fd-screen-spec-section { margin: 8px 0 0; font-size: 11px; }
+.fd-screen-spec-section ul { margin: 4px 0 0; padding-left: 17px; color: var(--text-secondary); }
+.fd-screen-spec-section li { margin: 3px 0; }
 .ws-chrome { border-bottom: 0; }
 .ws-seg { flex: 0 0 auto; background: var(--bg-base); }
 .ws-chrome-label { flex: 1 1 auto; min-width: 0; }

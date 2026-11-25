@@ -30,6 +30,7 @@ from ..models import (
     WorkflowEvent,
     utc_now,
 )
+from ..core.errors import AppError
 from . import layout
 from .schema import drop_inline_html, has_inline_html, initialize_schema
 
@@ -519,6 +520,14 @@ class Store:
             current = db.execute(
                 self._sql("SELECT version FROM screens WHERE session_id=? AND screen_id=? FOR UPDATE"), (sid, screen_id)
             ).fetchone()
+            if body.expected_version is not None and (current is None or current["version"] != body.expected_version):
+                actual = current["version"] if current else "missing"
+                raise AppError(
+                    "SCREEN_VERSION_CONFLICT",
+                    "Screen changed while you were editing",
+                    f"Expected screen version {body.expected_version}, but the current version is {actual}. Reload the latest screen and review the change before applying it.",
+                    409,
+                )
             version = current["version"] + 1 if current else 1
             # The object is written before the rows commit; a failed commit leaves an object no row
             # points to (rewritten by the next save of that version), never a row without its HTML.

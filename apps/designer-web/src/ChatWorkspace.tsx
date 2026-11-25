@@ -403,7 +403,9 @@ interface ParsedUserPrompt {
 }
 
 function parseUserPrompt(raw: string): ParsedUserPrompt {
-    const visible = raw.split(ATTACHMENT_CONTEXT_MARKER, 1)[0].trim();
+    const visible = raw.split(ATTACHMENT_CONTEXT_MARKER, 1)[0]
+        .replace(/^\[\[DESIGNER_SCREEN_EDIT:[^\]]+\]\]\s*/, "")
+        .trim();
     const match = visible.match(
         /^(.*?)(?:\r?\n\r?\n|\r?\n)?Attachments:\s*(.+)$/s,
     );

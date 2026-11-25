@@ -62,12 +62,21 @@ async def create_handoff(request: Request, body: DesignerHandoffRequest) -> Desi
     prompt = body.prompt
     if body.ba_package:
         attachment_name = f"ba-package-{body.feature_id}.json"
+        payload = body.ba_package.get("payload") if isinstance(body.ba_package.get("payload"), dict) else {}
+        artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), dict) else {}
+        feature = artifacts.get("feature_definition") if isinstance(artifacts.get("feature_definition"), dict) else {}
+        screen_specs = [item for item in feature.get("screen_specs", []) if isinstance(item, dict)]
+        screen_specs.sort(key=lambda item: int(item.get("sequence") or 0))
+        source_screen_contract = base64.urlsafe_b64encode(
+            json.dumps(screen_specs, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).decode("ascii") if screen_specs else ""
         parsed = parse_json_document(
             json.dumps(body.ba_package, ensure_ascii=False).encode("utf-8")
         )
         prompt = (
             f"{body.prompt}\n\n"
-            f"Attachments: {attachment_name}\n\n"
+            + (f"<!-- BA_SCREEN_CONTRACT_B64:{source_screen_contract} -->\n\n" if source_screen_contract else "")
+            + f"Attachments: {attachment_name}\n\n"
             "<!-- DESIGNER_ATTACHMENT_CONTEXT -->\n"
             "The following Markdown was produced by the attachment parser. "
             "Treat it as authoritative source context; preserve requirements, "

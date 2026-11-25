@@ -243,6 +243,7 @@ class ScreenWrite(BaseModel):
     width: int | None = Field(default=None, ge=320, le=2560)
     html: str = Field(min_length=1, max_length=400_000)
     note: str = Field(default="", max_length=400)
+    expected_version: int | None = Field(default=None, ge=1)
 
 
 class ScreenView(BaseModel):

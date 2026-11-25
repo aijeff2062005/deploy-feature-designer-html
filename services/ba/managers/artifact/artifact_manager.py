@@ -148,6 +148,11 @@ def merge_feature_definition_data(
         if delta.scope_out is not None
         else _union_strings([], current.scope_out)
     )
+    screen_specs = (
+        delta.screen_specs
+        if delta.screen_specs is not None
+        else current.screen_specs
+    )
 
     return FeatureDefinitionData(
         goal=new_goal,
@@ -157,6 +162,7 @@ def merge_feature_definition_data(
         # scope is a separate handoff contract and must not create or duplicate
         # Scope Out entries implicitly.
         scope_out=base_scope_out,
+        screen_specs=screen_specs,
         continuity=merged_continuity,
     )
 

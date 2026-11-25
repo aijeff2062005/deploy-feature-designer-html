@@ -554,7 +554,7 @@ def _apply_oq_artifact_update(artifacts: dict[str, Any], update: Any) -> bool:
             str(current.get("id") or ""),
         }:
             return False
-        allowed = {"goal", "actors", "scope_in", "scope_out"}
+        allowed = {"goal", "actors", "scope_in", "scope_out", "screen_specs"}
         if not set(value).issubset(allowed):
             return False
         merged = dict(current)

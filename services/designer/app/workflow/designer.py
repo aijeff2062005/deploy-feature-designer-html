@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("designer_agent.designer")
 _TRACE_CONTEXT: ContextVar[tuple[Any, str] | None] = ContextVar("designer_trace_context", default=None)
+_SCREEN_EDIT_MARKER = re.compile(r"^\[\[DESIGNER_SCREEN_EDIT:([^\]]+)\]\]\s*")
 _PROJECT_WIKI_STYLE_LOCK = re.compile(r"<style id=\"project-wiki-style-lock\">.*?</style>", re.S | re.I)
 
 
@@ -712,7 +713,8 @@ class HtmlDesigner:
     def _history(self, runs: list[RunView], *, first_limit: int, limit: int = 1500) -> str:
         lines = []
         for i, r in enumerate(runs[-HISTORY_RUNS:] if len(runs) > HISTORY_RUNS else runs):
-            lines.append(f"User: {_clip(r.prompt, first_limit if i == 0 else limit)}")
+            prompt = _SCREEN_EDIT_MARKER.sub("", r.prompt).strip()
+            lines.append(f"User: {_clip(prompt, first_limit if i == 0 else limit)}")
             if r.assistant_message:
                 lines.append(f"Designer: {_clip(r.assistant_message, 800)}")
         return "\n".join(lines) or "(none)"
@@ -816,6 +818,8 @@ class HtmlDesigner:
                 await self.store.set_session_design_system(session.id, baseline["design_system_id"])
                 session.design_system_id = baseline["design_system_id"]
         usage: dict[str, int] = {}
+        screen_edit_match = _SCREEN_EDIT_MARKER.match(run.prompt)
+        user_prompt = _SCREEN_EDIT_MARKER.sub("", run.prompt).strip()
         if session.source == "project-design-system":
             project_context = (
                 "\n\nPROJECT DESIGN SYSTEM AGENT MODE (applies to this entire project):\n"
@@ -843,9 +847,17 @@ class HtmlDesigner:
                 "preview gallery. The gallery options must be genuinely distinct directions generated for this product. "
                 "Do not start a feature UI spec after the user selects a gallery option; that selection saves the project-wide baseline."
             )
-            run_prompt = project_context + "\n\nProject title and description are already in Current brief.\nUser message: " + run.prompt
+            run_prompt = project_context + "\n\nProject title and description are already in Current brief.\nUser message: " + user_prompt
         else:
-            run_prompt = run.prompt
+            run_prompt = user_prompt
+        if screen_edit_match:
+            selected_ids = [entry.partition("@")[0] for entry in screen_edit_match.group(1).split(",")]
+            target_names = [f"{item.id} ({item.name})" for item in screens if item.id in selected_ids]
+            run_prompt = (
+                "SCREEN EDIT MODE. Only modify these exact selected screens, independently: "
+                + ", ".join(target_names)
+                + ". Do not target or modify any other screen.\nUser request: " + user_prompt
+            )
         decision = await self._llm_call("structured", trace_name="router.decide_intent",
             prompt=self.prompts.render(
                 "router",
@@ -859,7 +871,42 @@ class HtmlDesigner:
             usage=usage,
         )
         await self._usage(run, usage, "router")
-        normalized_prompt = _norm(run.prompt)
+        if screen_edit_match:
+            expected_versions: dict[str, int] = {}
+            for entry in screen_edit_match.group(1).split(","):
+                screen_id, separator, raw_version = entry.partition("@")
+                if not separator or not raw_version.isdigit():
+                    raise AppError("SCREEN_EDIT_TARGET_INVALID", "Invalid screen selection", "Reload Designer and select the screens again.", 422)
+                expected_versions[screen_id] = int(raw_version)
+            current_by_id = {item.id: item for item in screens}
+            missing = [screen_id for screen_id in expected_versions if screen_id not in current_by_id]
+            if missing:
+                raise AppError("SCREEN_EDIT_TARGET_MISSING", "Selected screen is unavailable", "One or more selected screens were removed. Reload Designer and choose again.", 409)
+            outside_scope = [screen_id for screen_id in decision.target_screen_ids if screen_id not in expected_versions]
+            if outside_scope:
+                raise AppError(
+                    "SCREEN_EDIT_SCOPE_MISMATCH", "Request is outside the selected screens",
+                    "The request appears to target a screen outside your selection. Select that screen and submit the request again.",
+                    422,
+                )
+            conflicts = [
+                f"{current_by_id[screen_id].name}: v{expected} → v{current_by_id[screen_id].version}"
+                for screen_id, expected in expected_versions.items()
+                if current_by_id[screen_id].version != expected
+            ]
+            if conflicts:
+                raise AppError(
+                    "SCREEN_VERSION_CONFLICT", "A selected screen has changed",
+                    "Another edit was saved after you opened this screen: " + "; ".join(conflicts) + ". Reload and review the latest version before applying your request.",
+                    409,
+                )
+            decision.brief = brief
+            decision.intent = "edit_screens"
+            decision.target_screen_ids = list(expected_versions)
+            decision.instruction = user_prompt
+            decision.reply = "Mình sẽ áp dụng yêu cầu riêng cho từng màn hình bạn đã chọn."
+            await self.store.set_run_data(run.id, run.revision, "screen_edit_targets", expected_versions)
+        normalized_prompt = "" if screen_edit_match else _norm(run.prompt)
         if re.search(r"\b(chọn|choose|select)\b", normalized_prompt):
             selected = next((item for item in brief.style_candidates
                              if item.key.casefold() in normalized_prompt or item.name.casefold() in normalized_prompt), None)
@@ -1882,6 +1929,16 @@ class HtmlDesigner:
             "instruction_present": bool(instruction),
         })
         existing = {s.id: s for s in await self.store.list_screens(session.id, with_html=True)}
+        expected_versions = await self.store.get_run_data(run.id, run.revision, "screen_edit_targets") or {}
+        for screen_id, expected in expected_versions.items():
+            current = existing.get(screen_id)
+            if current is None or current.version != expected:
+                actual = current.version if current else "missing"
+                raise AppError(
+                    "SCREEN_VERSION_CONFLICT", "A selected screen has changed",
+                    f"Screen {screen_id} was v{expected} when you submitted the request and is now {actual}. Reload and review the latest version before applying it.",
+                    409,
+                )
         summaries: dict[str, str] = {}
         built_screen_ids: set[str] = set()
 
@@ -1892,6 +1949,7 @@ class HtmlDesigner:
             current = existing.get(screen_id)
             summaries[screen_id] = await self._build_screen(
                 run, session, spec, screen, design, current.html if current and instruction else "", instruction,
+                expected_version=expected_versions.get(screen_id, current.version if current else None),
                 style_reference=style_references.get(screen.platform))
             built_screen_ids.add(screen_id)
 
@@ -2010,7 +2068,8 @@ class HtmlDesigner:
 
     async def _build_screen(self, run, session, spec: UiSpec, screen: ScreenSpec, design: DesignContext,
                             current_html: str, instruction: str,
-                            *, style_reference: dict[str, Any] | None = None) -> str:
+                            *, expected_version: int | None = None,
+                            style_reference: dict[str, Any] | None = None) -> str:
         _TRACE_CONTEXT.set((run, f"screen: {screen.name} ({screen.id})"))
         approved_screen = _approved_source_for_screen(spec, screen.id)
         default_approved_screen = _default_approved_brief(approved_screen)
@@ -2279,7 +2338,8 @@ class HtmlDesigner:
             )
         saved = await self.store.save_screen(
             session.id, screen.id,
-            ScreenWrite(name=screen.name, platform=screen.platform, html=html, note="Approved build"),
+            ScreenWrite(name=screen.name, platform=screen.platform, html=html, note="Approved build",
+                        expected_version=expected_version),
             run_id=run.id, updated_by="designer-agent",
         )
         await self._emit(run, "screen.saved", {"screen_id": screen.id, "version": saved.version, "note": "approved build"})

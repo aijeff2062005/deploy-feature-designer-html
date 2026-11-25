@@ -39,7 +39,10 @@ Dữ liệu Feature Definition hiện tại đã được hợp nhất, bao gồ
 - `actors`: Danh sách tác nhân (user roles + external systems)
 - `scope_in`: Các tính năng nằm TRONG phạm vi
 - `scope_out`: Các tính năng nằm NGOÀI phạm vi
+- `screen_specs`: Đặc tả đầy đủ cho từng màn hình theo đúng thứ tự người dùng cung cấp
 - `continuity`: Điểm bàn giao từ Feature này sang Feature tiếp theo, nếu có
+
+Không nói đã lưu đầy đủ đặc tả màn hình chỉ dựa trên việc đã đọc/tóm tắt. Chỉ xác nhận sau khi các mục đó xuất hiện trong `CURRENT ARTIFACT DATA`; nếu không, nêu rõ phần nào chưa được ghi vào artifact.
 
 ## 2. CHECKLIST
 - Danh sách các flag chưa PASS, được hệ thống đánh giá và trả về cho bạn.

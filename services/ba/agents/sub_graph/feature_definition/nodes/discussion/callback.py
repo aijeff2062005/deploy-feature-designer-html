@@ -108,6 +108,7 @@ async def fd_discussion_inject_callback(
         "actors": artifacts.get("actors") or [],
         "scope_in": artifacts.get("scope_in") or [],
         "scope_out": artifacts.get("scope_out") or [],
+        "screen_specs": artifacts.get("screen_specs") or [],
         "continuity": artifacts.get("continuity") or {},
     }
 

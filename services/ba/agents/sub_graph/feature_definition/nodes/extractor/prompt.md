@@ -40,6 +40,7 @@ Nhiệm vụ Duy Nhất của bạn là đọc tin nhắn người dùng kết h
    - `actors`: Chỉ điền khi người dùng tuyên bố/chốt danh sách tên tác nhân. Nếu là câu hỏi xin gợi ý actors → trả về `[]`.
    - `scope_in`: Chỉ điền khi người dùng tuyên bố/chốt danh sách chức năng thuộc phạm vi. Nếu là câu hỏi → trả về `[]`.
    - `scope_out`: Chỉ điền khi người dùng tuyên bố/chốt danh sách chức năng ngoài phạm vi. Nếu là câu hỏi → trả về `[]`.
+   - `screen_specs`: Khi User cung cấp hoặc sửa đặc tả màn hình, trích xuất đầy đủ theo đúng thứ tự; giữ nguyên slug/ID, kích thước, nội dung, CTA/điều hướng, trạng thái/lỗi, quy tắc và dữ liệu bàn giao đã nêu. Không rút đặc tả thành tên màn hình nếu User đã cung cấp chi tiết.
 
 ---
 
@@ -69,9 +70,11 @@ Nhiệm vụ Duy Nhất của bạn là đọc tin nhắn người dùng kết h
 - Khi người dùng **tuyên bố thay đổi, sửa, thêm mới, hoặc xóa** thông tin của một trường (ví dụ: `actors`, `goal`, `scope_in`, `scope_out`):
   - **Trường Chuỗi (`goal`)**: Trả về câu văn mục tiêu MỚI hoàn chỉnh.
   - **Trường Danh sách (`actors`, `scope_in`, `scope_out`)**: Dựa trên Current Data, áp dụng thay đổi của User rồi trả về **TOÀN BỘ DANH SÁCH MỚI**. Dùng `[]` khi User muốn xóa hết; dùng `null` hoặc bỏ trường khi User không yêu cầu thay đổi.
+  - **`screen_specs`**: Nếu User cung cấp/sửa yêu cầu theo màn hình, trả về danh sách đặc tả đầy đủ theo thứ tự mới nhất, giữ lại chi tiết cũ chưa bị thay thế. Mỗi mục phải có `screen_id`, `name`, `sequence`; đặt các khối giao diện vào `sections`, CTA/đích vào `actions`, lỗi/trạng thái vào `states`, điều kiện nghiệp vụ vào `rules`, dữ liệu vào/ra vào `data_contract`, giới hạn khác vào `notes`. Không tự suy đoán chi tiết còn thiếu.
 
 ### 3. QUY TẮC CHO TRƯỜNG KHÔNG ĐƯỢC NHẮC ĐẾN:
 - Nếu trong lượt hội thoại hiện tại, người dùng **KHÔNG nhắc đến hoặc KHÔNG yêu cầu thay đổi** một trường nào:
+  - `screen_specs`: trả `null` để giữ nguyên; chỉ dùng `[]` khi User yêu cầu xóa toàn bộ đặc tả màn hình.
   - **Trường Chuỗi (`goal`)**: Đặt giá trị là chuỗi rỗng `""`.
   - **Trường Danh sách (`actors`, `scope_in`, `scope_out`)**: Đặt là `null` hoặc bỏ trường; không dùng `[]` trừ khi User yêu cầu xóa toàn bộ danh sách.
 - Hệ thống backend sẽ giữ nguyên dữ liệu hiện tại cho các trường không thay đổi (`""` hoặc `null`). Danh sách `[]` là yêu cầu xóa toàn bộ danh sách.

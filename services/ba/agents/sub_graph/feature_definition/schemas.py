@@ -51,6 +51,22 @@ class FeatureContinuityData(BaseModel):
     entry_state: str | None = Field(None, description="Confirmed starting condition inherited from the upstream End State.")
 
 
+class FeatureScreenSpec(BaseModel):
+    """Detailed, ordered screen requirements provided for a feature."""
+
+    screen_id: str = Field(..., description="Stable screen slug, e.g. chon-chuyen-bay-moi.")
+    name: str = Field(..., description="Human-readable screen title.")
+    sequence: int = Field(..., ge=1, description="1-based position in the user flow.")
+    platform: str | None = Field(None, description="Target platform or viewport, if specified.")
+    purpose: str | None = Field(None, description="What this screen lets the user accomplish.")
+    sections: list[str] = Field(default_factory=list, description="Named UI blocks and required visible content.")
+    actions: list[str] = Field(default_factory=list, description="Primary/secondary actions and destinations.")
+    states: list[str] = Field(default_factory=list, description="Loading, empty, disabled, error, success, or other specified states.")
+    rules: list[str] = Field(default_factory=list, description="Screen-specific business rules and validations.")
+    data_contract: list[str] = Field(default_factory=list, description="Data passed in, calculated, or handed off by this screen.")
+    notes: list[str] = Field(default_factory=list, description="Other explicit constraints from the user's brief.")
+
+
 class FeatureDefinitionData(BaseModel):
     """Schema cho FD Extractor output. LLM trả về delta mỗi turn."""
 
@@ -74,7 +90,10 @@ class FeatureDefinitionData(BaseModel):
         description="Capabilities KHÔNG thuộc phạm vi. "
         "Nếu có thay đổi, trả về toàn bộ danh sách mới; null nếu không thay đổi; [] nếu người dùng xóa toàn bộ.",
     )
-
+    screen_specs: list[FeatureScreenSpec] | None = Field(
+        None,
+        description="Complete ordered screen-by-screen requirements when explicitly supplied; null preserves existing specs, [] clears them.",
+    )
 
     continuity: FeatureContinuityData | None = Field(
         None,
@@ -177,6 +196,7 @@ __all__ = [
     "FeatureContinuityData",
     "FeatureHandoffData",
     "FeatureDefinitionData",
+    "FeatureScreenSpec",
     "IncomingFeatureHandoffData",
     "OQASMDetectionData",
     "OpenQuestionItem",

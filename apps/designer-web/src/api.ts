@@ -152,7 +152,7 @@ export const api = {
     saveScreen: (
         sessionId: string,
         screenId: string,
-        body: { name: string; platform: string; html: string; note?: string },
+        body: { name: string; platform: string; html: string; note?: string; expected_version?: number },
     ) =>
         request<Screen>(`/sessions/${sessionId}/screens/${screenId}`, {
             method: "PUT",

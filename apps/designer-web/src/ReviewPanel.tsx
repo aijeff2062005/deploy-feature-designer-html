@@ -22,12 +22,13 @@ interface Props {
     screensVersion: number;
     onReview: (decision: "approved" | "changes_requested", feedback?: string) => void;
     onShowFiles?: () => void;
+    onOpenCanvas: (screenId?: string) => void;
 }
 
 const PLATFORM_ICON = { mobile: Smartphone, tablet: Tablet, desktop: Monitor, responsive: Monitor };
 
 /** Workbench: the UI specification under review, the built screens, exports and token use. */
-export function ReviewPanel({ run, sessionId, artifacts, screensVersion, onReview, onShowFiles }: Props) {
+export function ReviewPanel({ run, sessionId, artifacts, screensVersion, onReview, onShowFiles, onOpenCanvas }: Props) {
     const [tab, setTab] = useState<"review" | "screens" | "json">("review");
     const [selected, setSelected] = useState(0);
     const [feedback, setFeedback] = useState("");
@@ -211,7 +212,7 @@ export function ReviewPanel({ run, sessionId, artifacts, screensVersion, onRevie
                                 <button
                                     className="primary-button"
                                     type="button"
-                                    onClick={() => window.open(canvasUrl(sessionId), `designer-canvas-${sessionId}`)}
+                                    onClick={() => onOpenCanvas()}
                                 >
                                     <ExternalLink size={15} /> Mở trang thiết kế
                                 </button>
@@ -228,7 +229,7 @@ export function ReviewPanel({ run, sessionId, artifacts, screensVersion, onRevie
                                         key={screen.id}
                                         className="artifact-card"
                                         href={canvasUrl(sessionId) + `&screen=${screen.id}`}
-                                        target={`designer-canvas-${sessionId}`}
+                                        onClick={(event) => { event.preventDefault(); onOpenCanvas(screen.id); }}
                                     >
                                         <img
                                             src={`${api.screenshotUrl(sessionId, screen.id)}&v=${screen.version}`}

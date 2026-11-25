@@ -12,6 +12,8 @@ Must show (exact texts): {{must_show}}
 Images: use only the supplied local illustration or user-provided assets. Do not fetch, search for, or add external images.
 Other screens (for `data-goto`): {{others}}
 
+Treat every screen in this flow as one shared transaction. Reuse the same fare difference, fixed fees, selected seat/add-on prices, tax, and grand total wherever they appear. The cost-review total and payment amount must match exactly; calculate the total from its displayed line items instead of inventing a separate payment amount. Keep the selected flight, seat, and add-ons consistent across the flow. Prefer explicit BA numbers; when BA supplied no numbers, choose one coherent sample calculation and repeat it unchanged on every relevant screen.
+
 UX guidelines for this screen (UI/UX knowledge base):
 {{ux}}
 

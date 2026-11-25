@@ -11,6 +11,7 @@ export function WorkspaceHeader({
     onReview,
     onSettings,
     onOpenCanvas,
+    canvasOpen,
 }: {
     session?: Session;
     run?: Run;
@@ -20,6 +21,7 @@ export function WorkspaceHeader({
     onReview: () => void;
     onSettings: () => void;
     onOpenCanvas?: () => void;
+    canvasOpen?: boolean;
 }) {
     const platform = isEmbedded ? undefined : usePlatform();
     return (
@@ -86,10 +88,11 @@ export function WorkspaceHeader({
                     <button
                         className="secondary-button compact"
                         onClick={onOpenCanvas}
-                        title="Mở trang thiết kế ở tab mới"
+                        title={canvasOpen ? "Quay lại hội thoại Designer" : "Mở phần thiết kế trong trang này"}
                         type="button"
                     >
-                        <ExternalLink size={15} /> Trang thiết kế
+                        {canvasOpen ? <ArrowLeft size={15} /> : <ExternalLink size={15} />}
+                        {canvasOpen ? "Quay lại chat" : "Trang thiết kế"}
                     </button>
                 )}
                 <a

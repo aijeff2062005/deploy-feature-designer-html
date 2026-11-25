@@ -50,6 +50,7 @@ async def fd_merge_callback(
         actors=current_fd.get("actors") or [],
         scope_in=current_fd.get("scope_in") or [],
         scope_out=current_fd.get("scope_out") or [],
+        screen_specs=current_fd.get("screen_specs"),
         continuity=current_fd.get("continuity"),
     )
 
@@ -60,6 +61,7 @@ async def fd_merge_callback(
         "actors": merged.actors,
         "scope_in": merged.scope_in,
         "scope_out": merged.scope_out,
+        "screen_specs": [item.model_dump(exclude_none=True) for item in merged.screen_specs] if merged.screen_specs is not None else [],
         "continuity": merged.continuity.model_dump(exclude_none=True) if merged.continuity else None,
     }
     # Reassign top-level state key to trigger ADK State.__setitem__ and commit delta to session storage
@@ -86,6 +88,7 @@ async def fd_extractor_inject_callback(
             "actors": artifacts.get("actors") or [],
             "scope_in": artifacts.get("scope_in") or [],
             "scope_out": artifacts.get("scope_out") or [],
+            "screen_specs": artifacts.get("screen_specs") or [],
             "continuity": artifacts.get("continuity") or {},
         },
         ensure_ascii=False,
