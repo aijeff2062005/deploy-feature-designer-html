@@ -25,7 +25,7 @@ import {
     ZoomOut,
     X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { MentionMenu } from "./MentionMenu";
 import {
     ATTACH_EVENT,
@@ -45,6 +45,12 @@ import type {
     HulyIssueResult,
     HulyAttachmentPreview,
     HulyProject,
+    HulyProposedTask,
+    HulyTaskProposalResponse,
+    HulyTaskConfig,
+    HulyProjectMetadata,
+    HulyIssueMatch,
+    HulyBulkIssueResult,
     WorkflowEvent,
     ExactAsset,
 } from "./types";
@@ -600,12 +606,31 @@ export function ChatWorkspace({
     const [activityLogOpen, setActivityLogOpen] = useState(false);
     const [hulyDialogOpen, setHulyDialogOpen] = useState(false);
     const [hulyProjects, setHulyProjects] = useState<HulyProject[]>([]);
+    const [hulyMembers, setHulyMembers] = useState<{ name: string; email: string }[]>([]);
+    const [hulyEpics, setHulyEpics] = useState<{ identifier: string; title: string }[]>([]);
+    const [hulyEpicId, setHulyEpicId] = useState("");
+    const [hulyEpicsLoading, setHulyEpicsLoading] = useState(false);
+    const [hulyMetadata, setHulyMetadata] = useState<HulyProjectMetadata | null>(null);
+    const [hulyMetadataLoading, setHulyMetadataLoading] = useState(false);
+    const [relatedQueries, setRelatedQueries] = useState<Record<string, string>>({});
+    const [relatedOptions, setRelatedOptions] = useState<Record<string, HulyIssueMatch[]>>({});
+    const [hulyEpicError, setHulyEpicError] = useState("");
     const [hulyProjectId, setHulyProjectId] = useState("");
     const [hulyDraft, setHulyDraft] = useState<Omit<HulyIssueDraft, "run_id" | "project_id"> | null>(null);
+    const [hulyProposal, setHulyProposal] = useState<HulyTaskProposalResponse | null>(null);
+    const [hulyProposalCacheOwner, setHulyProposalCacheOwner] = useState("");
+    const [selectedProposalKey, setSelectedProposalKey] = useState("");
+    const [selectedProposalKeys, setSelectedProposalKeys] = useState<string[]>([]);
+    const [hulyTaskConfigs, setHulyTaskConfigs] = useState<Record<string, HulyTaskConfig>>({});
+    const [clarificationDecisions, setClarificationDecisions] = useState<Record<number, "confirm" | "defer" | "exclude">>({});
+    const [clarificationAnswers, setClarificationAnswers] = useState<Record<number, string>>({});
+    const [hulyDialogStage, setHulyDialogStage] = useState<"proposal" | "detail" | "clarify" | "configure" | "review">("proposal");
     const [hulyLoading, setHulyLoading] = useState(false);
     const [hulySubmitting, setHulySubmitting] = useState(false);
     const [hulyError, setHulyError] = useState("");
+    const [hulyProposalError, setHulyProposalError] = useState("");
     const [hulyCreated, setHulyCreated] = useState<HulyIssueResult | null>(null);
+    const [hulyBulkCreated, setHulyBulkCreated] = useState<HulyBulkIssueResult | null>(null);
     const [hulyArtifacts, setHulyArtifacts] = useState<HulyAttachmentPreview | null>(null);
     const [hulyPreviewTab, setHulyPreviewTab] = useState<"png" | "spec" | "tokens" | null>(null);
     const [hulyPreviewIndex, setHulyPreviewIndex] = useState(0);
@@ -613,6 +638,7 @@ export function ChatWorkspace({
     const [hulyPngMode, setHulyPngMode] = useState<"overview" | "screen">("overview");
     const [hulyPngImmersive, setHulyPngImmersive] = useState(false);
     const [hulyPreviewError, setHulyPreviewError] = useState("");
+    const hulyDialogBodyRef = useRef<HTMLDivElement>(null);
     const conversationEndRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     // Platform: shared project files can be cited with "@" or dragged in.
@@ -624,6 +650,48 @@ export function ChatWorkspace({
         : [];
     const fileInputRef = useRef<HTMLInputElement>(null);
 
+    useEffect(() => {
+        if (!hulyDialogOpen || !hulyProjectId) return;
+        let active = true;
+        setHulyEpicsLoading(true);
+        setHulyEpicError("");
+        setHulyEpicId("");
+        setHulyDraft((current) => current ? { ...current, epic_id: "" } : current);
+        api.hulyEpics(hulyProjectId).then((response) => {
+            if (active) setHulyEpics(response.epics);
+        }).catch((error) => {
+            if (!active) return;
+            setHulyEpics([]);
+            setHulyEpicError(error instanceof Error ? error.message : "Không tải được danh sách Epic.");
+        }).finally(() => { if (active) setHulyEpicsLoading(false); });
+        return () => { active = false; };
+    }, [hulyDialogOpen, hulyProjectId]);
+
+    useEffect(() => {
+        if (!hulyDialogOpen || !hulyProjectId) { setHulyMetadata(null); return; }
+        let active = true;
+        setHulyMetadataLoading(true);
+        api.hulyProjectMetadata(hulyProjectId).then((metadata) => {
+            if (!active) return;
+            setHulyMetadata(metadata);
+            setHulyTaskConfigs((current) => Object.fromEntries(Object.entries(current).map(([key, config]) => [key, { ...config, status: config.status || metadata.default_status, task_type: config.task_type || metadata.task_types[0]?.name || metadata.task_types[0]?.title || "" }])));
+        }).catch((error) => {
+            if (active) { setHulyMetadata(null); setHulyError(error instanceof Error ? error.message : "Không tải được cấu hình Huly."); }
+        }).finally(() => { if (active) setHulyMetadataLoading(false); });
+        return () => { active = false; };
+    }, [hulyDialogOpen, hulyProjectId]);
+
+    const hulyProposalCacheKey = sessionId && run ? `huly-proposal:v2:${sessionId}:${run.id}` : "";
+    useLayoutEffect(() => {
+        if (hulyDialogOpen && hulyDialogBodyRef.current) hulyDialogBodyRef.current.scrollTop = 0;
+    }, [hulyDialogOpen, hulyDialogStage]);
+    useEffect(() => {
+        if (!hulyProposalCacheKey || !hulyProposal || hulyProposalCacheOwner !== hulyProposalCacheKey) return;
+        try {
+            sessionStorage.setItem(hulyProposalCacheKey, JSON.stringify({ proposal: hulyProposal, selectedProposalKey, selectedProposalKeys, hulyTaskConfigs, hulyDialogStage, clarificationDecisions, clarificationAnswers, hulyProjectId, hulyEpicId, hulyBulkCreated }));
+        } catch { /* Keep the current in-memory proposal if session storage is unavailable. */ }
+    }, [hulyProposalCacheKey, hulyProposalCacheOwner, hulyProposal, selectedProposalKey, selectedProposalKeys, hulyTaskConfigs, hulyDialogStage, clarificationDecisions, clarificationAnswers, hulyProjectId, hulyEpicId, hulyBulkCreated]);
+
     const canReview =
         (run?.stage === "review_spec" || run?.stage === "review_final") &&
         run.status === "waiting_review";
@@ -634,22 +702,29 @@ export function ChatWorkspace({
         run.specification?.schema_version === "html-1" &&
         run.specification.screens.length > 0,
     );
+    const selectedProposedTask = hulyProposal?.proposal.tasks.find((task) => task.key === selectedProposalKey) ?? null;
+    const selectedProposedTasks = hulyProposal?.proposal.tasks.filter((task) => selectedProposalKeys.includes(task.key)) ?? [];
+    const proposalPriorityLabel: Record<string, string> = { urgent: "Urgent", high: "High", medium: "Medium", low: "Low", none: "Chưa đề xuất" };
+    const proposalWorkstreamLabel: Record<string, string> = {
+        FE: "Trải nghiệm người dùng", BE: "Nghiệp vụ & tích hợp", QA: "Chất lượng phát hành",
+        BA: "Quy trình nghiệp vụ", Design: "Trải nghiệm & nội dung", Other: "Đầu việc tổng hợp",
+    };
     const finalBlocked = false;
     const designWikiFiles = wikiPreviewFiles.map((file) => ({
         ...file,
         summary: file.path.endsWith("/design-system.json")
-            ? "Style contract ?? ch?n, l?u trong Project Wiki"
+            ? "Style contract được chọn, lưu trong Project Wiki"
             : file.path.endsWith("manifest.json")
-              ? "Manifest phi?n b?n v? tham chi?u t?i nguy?n"
+              ? "Manifest phiên bản và tham chiếu tài nguyên"
               : file.path.endsWith(".md")
-                ? "T?i li?u Design System trong Project Wiki"
+                ? "Tài liệu Design System trong Project Wiki"
                 : file.path.endsWith(".css")
-                  ? "CSS c?a m?u UI ?? ch?n"
+                  ? "CSS của mẫu UI đã chọn"
                   : file.path.endsWith(".jpg")
-                    ? "?nh preview c?a m?u UI ?? ch?n"
+                    ? "Ảnh preview của mẫu UI đã chọn"
                     : file.path.endsWith(".html")
-                      ? "HTML d?ng chung t? m?u UI ?? ch?n"
-                      : "T?p Design System trong Project Wiki",
+                      ? "HTML dùng chung từ mẫu UI đã chọn"
+                      : "Tệp Design System trong Project Wiki",
     }));
 
     const approveCurrentReview = async () => {
@@ -694,17 +769,67 @@ export function ChatWorkspace({
         }
     };
 
+    const applyHulyProposal = (response: HulyTaskProposalResponse, snapshot?: { selectedProposalKey?: string; selectedProposalKeys?: string[]; hulyTaskConfigs?: Record<string, HulyTaskConfig> }) => {
+        const tasks = response.proposal.tasks;
+        setHulyProposal(response);
+        setHulyProposalCacheOwner(hulyProposalCacheKey);
+        setSelectedProposalKey(snapshot?.selectedProposalKey && tasks.some((task) => task.key === snapshot.selectedProposalKey) ? snapshot.selectedProposalKey : tasks[0]?.key ?? "");
+        setSelectedProposalKeys(Array.isArray(snapshot?.selectedProposalKeys) ? snapshot.selectedProposalKeys.filter((key) => tasks.some((task) => task.key === key)) : tasks.map((task) => task.key));
+        setHulyTaskConfigs(Object.fromEntries(tasks.map((task) => [task.key, {
+            assignee: snapshot?.hulyTaskConfigs?.[task.key]?.assignee ?? "",
+            due_date: snapshot?.hulyTaskConfigs?.[task.key]?.due_date ?? "",
+            priority: snapshot?.hulyTaskConfigs?.[task.key]?.priority ?? task.priority,
+            status: snapshot?.hulyTaskConfigs?.[task.key]?.status || hulyMetadata?.default_status || "",
+            task_type: snapshot?.hulyTaskConfigs?.[task.key]?.task_type || hulyMetadata?.task_types[0]?.name || hulyMetadata?.task_types[0]?.title || "",
+            labels: snapshot?.hulyTaskConfigs?.[task.key]?.labels ?? [],
+            component: snapshot?.hulyTaskConfigs?.[task.key]?.component ?? "",
+            milestone: snapshot?.hulyTaskConfigs?.[task.key]?.milestone ?? "",
+            estimation_hours: snapshot?.hulyTaskConfigs?.[task.key]?.estimation_hours ?? null,
+            dependency_keys: snapshot?.hulyTaskConfigs?.[task.key]?.dependency_keys ?? task.dependency_keys,
+            related_issue_ids: snapshot?.hulyTaskConfigs?.[task.key]?.related_issue_ids ?? [],
+        }])));
+    };
+
     const openHulyDialog = async () => {
         if (!run || !sessionId) return;
         setHulyDialogOpen(true);
         setHulyError("");
+        setHulyProposalError("");
+        setHulyDialogStage("proposal");
         setHulyCreated(null);
+        setHulyBulkCreated(null);
+        setClarificationDecisions({});
+        setClarificationAnswers({});
         setHulyArtifacts(null);
         setHulyPreviewTab(null);
         setHulyPreviewIndex(0);
         setHulyPreviewZoom(1);
         setHulyPreviewError("");
         setHulyLoading(true);
+        let cachedProposal: HulyTaskProposalResponse | null = null;
+        let cachedSnapshot: { selectedProposalKey?: string; selectedProposalKeys?: string[]; hulyTaskConfigs?: Record<string, HulyTaskConfig>; hulyDialogStage?: "proposal" | "detail" | "clarify" | "configure" | "review"; clarificationDecisions?: Record<number, "confirm" | "defer" | "exclude">; clarificationAnswers?: Record<number, string>; hulyProjectId?: string; hulyEpicId?: string; hulyBulkCreated?: HulyBulkIssueResult | null } | undefined;
+        try {
+            const cached = hulyProposalCacheKey ? sessionStorage.getItem(hulyProposalCacheKey) : null;
+            if (cached) {
+                const parsed = JSON.parse(cached);
+                if (parsed?.proposal?.proposal?.tasks?.length) {
+                    cachedProposal = parsed.proposal as HulyTaskProposalResponse;
+                    cachedSnapshot = parsed;
+                    applyHulyProposal(cachedProposal, cachedSnapshot);
+                    if (cachedSnapshot?.hulyDialogStage) setHulyDialogStage(cachedSnapshot.hulyDialogStage);
+                    if (cachedSnapshot?.clarificationDecisions) setClarificationDecisions(cachedSnapshot.clarificationDecisions);
+                    if (cachedSnapshot?.clarificationAnswers) setClarificationAnswers(cachedSnapshot.clarificationAnswers);
+                    if (cachedSnapshot?.hulyProjectId) setHulyProjectId(cachedSnapshot.hulyProjectId);
+                    if (cachedSnapshot?.hulyEpicId) setHulyEpicId(cachedSnapshot.hulyEpicId);
+                    if (cachedSnapshot?.hulyBulkCreated) setHulyBulkCreated(cachedSnapshot.hulyBulkCreated);
+                }
+            }
+        } catch { /* Ignore invalid browser cache and request a fresh proposal. */ }
+        if (!cachedProposal) {
+            setHulyProposal(null);
+            setSelectedProposalKeys([]);
+            setHulyTaskConfigs({});
+        }
         const screens = run.specification?.schema_version === "html-1" ? run.specification.screens : [];
         const screenNames = screens.map((screen) => screen.name).join(", ");
         const screenNotes = screens.map((screen, index) => {
@@ -731,10 +856,16 @@ export function ChatWorkspace({
             current_state: `Thiết kế UI${screenNames ? ` (${screenNames})` : ""} đã được PO duyệt trong Agent Designer; hiện chưa có task Huly theo dõi phần triển khai.`,
             solution: `${run.specification?.style_direction ? `Hướng thiết kế: ${run.specification.style_direction.slice(0, 500)}\n\n` : ""}Danh sách màn hình và phạm vi:\n${screenNotes}`,
             acceptance_criteria: acceptanceCriteria,
+            priority: "none",
+            assignee: "",
+            due_date: "",
+            epic_id: "",
         });
-        const [projectsResult, previewResult] = await Promise.allSettled([
+        const [projectsResult, membersResult, previewResult, proposalResult] = await Promise.allSettled([
             api.hulyProjects(),
+            api.hulyMembers(),
             api.hulyAttachmentPreview(sessionId, run.id),
+            cachedProposal ? Promise.resolve(cachedProposal) : api.proposeHulyTasks(sessionId, run.id),
         ]);
         if (projectsResult.status === "fulfilled") {
             const response = projectsResult.value;
@@ -743,6 +874,12 @@ export function ChatWorkspace({
             setHulyProjectId((current) => current || preferred?.id || response.projects[0]?.id || "");
         } else {
             setHulyError(projectsResult.reason instanceof Error ? projectsResult.reason.message : "Không tải được danh sách project Huly.");
+        }
+        if (membersResult.status === "fulfilled") {
+            setHulyMembers(membersResult.value.members);
+        } else {
+            setHulyMembers([]);
+            setHulyError((current) => current || (membersResult.reason instanceof Error ? membersResult.reason.message : "Không tải được thành viên Huly."));
         }
         if (previewResult.status === "fulfilled") {
             const preview = previewResult.value;
@@ -754,21 +891,137 @@ export function ChatWorkspace({
                     current_state: preview.task_draft.current_state,
                     solution: preview.task_draft.solution,
                     acceptance_criteria: preview.task_draft.acceptance_criteria,
+                    priority: "none",
+                    assignee: "",
+                    due_date: "",
+                    epic_id: "",
                 });
             }
         } else {
             setHulyPreviewError(previewResult.reason instanceof Error ? previewResult.reason.message : "Không tải được tài liệu xem trước.");
         }
+        if (proposalResult.status === "fulfilled") {
+            applyHulyProposal(proposalResult.value, cachedSnapshot);
+        } else {
+            setHulyProposalError(proposalResult.reason instanceof Error ? proposalResult.reason.message : "Không tạo được đề xuất task.");
+        }
         setHulyLoading(false);
     };
 
-    const submitHulyIssue = async () => {
-        if (!run || !sessionId || !hulyDraft || !hulyProjectId || hulySubmitting) return;
+    const updateProposedTask = (key: string, update: Partial<HulyProposedTask>) => {
+        setHulyProposal((current) => current ? {
+            ...current,
+            proposal: {
+                ...current.proposal,
+                tasks: current.proposal.tasks.map((task) => task.key === key ? { ...task, ...update } : task),
+            },
+        } : current);
+    };
+
+    const toggleProposalTask = (key: string, checked: boolean) => {
+        const tasks = hulyProposal?.proposal.tasks ?? [];
+        const byKey = new Map(tasks.map((task) => [task.key, task]));
+        setSelectedProposalKeys((current) => {
+            const next = new Set(current);
+            if (checked) {
+                const addWithDependencies = (taskKey: string) => {
+                    if (next.has(taskKey)) return;
+                    next.add(taskKey);
+                    byKey.get(taskKey)?.dependency_keys.forEach(addWithDependencies);
+                };
+                addWithDependencies(key);
+            } else {
+                next.delete(key);
+                let changed = true;
+                while (changed) {
+                    changed = false;
+                    for (const taskKey of [...next]) {
+                        if (byKey.get(taskKey)?.dependency_keys.some((dependency) => !next.has(dependency))) {
+                            next.delete(taskKey);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            return tasks.map((task) => task.key).filter((taskKey) => next.has(taskKey));
+        });
+    };
+
+    const updateTaskConfig = (key: string, update: Partial<HulyTaskConfig>) => {
+        setHulyTaskConfigs((current) => ({ ...current, [key]: { ...current[key], ...update } }));
+    };
+
+    const searchRelatedIssues = async (taskKey: string, query: string) => {
+        setRelatedQueries((current) => ({ ...current, [taskKey]: query }));
+        if (query.trim().length < 2 || !hulyProjectId) { setRelatedOptions((current) => ({ ...current, [taskKey]: [] })); return; }
+        try {
+            const result = await api.searchHulyIssues(hulyProjectId, query.trim());
+            setRelatedOptions((current) => ({ ...current, [taskKey]: result.issues }));
+        } catch { setRelatedOptions((current) => ({ ...current, [taskKey]: [] })); }
+    };
+
+    const continueWithSelectedProposal = () => {
+        const task = hulyProposal?.proposal.tasks.find((item) => item.key === selectedProposalKey);
+        if (!task) return;
+        setHulyDialogStage("detail");
+    };
+
+    const continueFromClarifications = () => {
+        const questions = hulyProposal?.proposal.open_questions ?? [];
+        for (let index = 0; index < questions.length; index += 1) {
+            const decision = clarificationDecisions[index];
+            if (!decision || (decision === "confirm" && !clarificationAnswers[index]?.trim())) {
+                setHulyError("Hãy ghi nhận quyết định cho từng câu hỏi BA/PO trước khi tiếp tục.");
+                return;
+            }
+        }
+        const excludedKeys = new Set(questions.flatMap((question, index) => clarificationDecisions[index] === "exclude" ? question.affected_task_keys : []));
+        if (excludedKeys.size) {
+            const byKey = new Map((hulyProposal?.proposal.tasks ?? []).map((task) => [task.key, task]));
+            setSelectedProposalKeys((current) => {
+                const next = new Set(current.filter((key) => !excludedKeys.has(key)));
+                let changed = true;
+                while (changed) {
+                    changed = false;
+                    for (const key of [...next]) {
+                        if (byKey.get(key)?.dependency_keys.some((dependency) => !next.has(dependency))) { next.delete(key); changed = true; }
+                    }
+                }
+                return (hulyProposal?.proposal.tasks ?? []).map((task) => task.key).filter((key) => next.has(key));
+            });
+            setHulyTaskConfigs((current) => Object.fromEntries(Object.entries(current).map(([key, config]) => [key, { ...config, dependency_keys: config.dependency_keys.filter((dependency) => !excludedKeys.has(dependency)) }])));
+        }
+        setHulyError("");
+        setHulyDialogStage("configure");
+    };
+
+    const submitHulyIssues = async () => {
+        if (!run || !sessionId || !hulyProposal || !hulyProjectId || hulySubmitting) return;
+        if (!selectedProposedTasks.length) { setHulyError("Chọn ít nhất một task cần tạo."); return; }
+        const missing = selectedProposedTasks.filter((task) => {
+            const config = hulyTaskConfigs[task.key];
+            return !config?.assignee || !config?.due_date || config.priority === "none";
+        });
+        if (missing.length) { setHulyError(`Hoàn tất người nhận, deadline và priority cho: ${missing.map((task) => task.title).join(", ")}`); return; }
         setHulySubmitting(true);
         setHulyError("");
         try {
-            const result = await api.createHulyIssue(sessionId, { ...hulyDraft, run_id: run.id, project_id: hulyProjectId });
-            setHulyCreated(result);
+            const tasks = selectedProposedTasks.map((task) => {
+                const config = hulyTaskConfigs[task.key];
+                const questionNotes = (hulyProposal.proposal.open_questions ?? []).flatMap((question, index) => {
+                    if (!question.affected_task_keys.includes(task.key)) return [];
+                    const decision = clarificationDecisions[index];
+                    return decision === "confirm" ? [`BA/PO đã xác nhận: ${clarificationAnswers[index]}`] : decision === "defer" ? [`Cần BA/PO xác nhận sau: ${question.question}`] : [];
+                });
+                return {
+                    ...task,
+                    ...config,
+                    source_titles: task.source_refs.map((ref) => hulyProposal.sources?.[ref] || ref),
+                    clarification_notes: questionNotes,
+                };
+            });
+            const result = await api.createHulyIssues(sessionId, { run_id: run.id, project_id: hulyProjectId, epic_id: hulyEpicId, tasks });
+            setHulyBulkCreated(result);
         } catch (error) {
             setHulyError(error instanceof Error ? error.message : "Không tạo được task trên Huly.");
         } finally {
@@ -1435,7 +1688,7 @@ export function ChatWorkspace({
                                 </div>
                                 <button className="chat-review-btn approve huly-create-cta" type="button" onClick={openHulyDialog} disabled={Boolean(hulyCreated)}>
                                     <ClipboardList size={16} />
-                                    {hulyCreated ? `Đã tạo ${hulyCreated.identifier}` : "Xác nhận & tạo task"}
+                                    {hulyCreated ? `Đã tạo ${hulyCreated.identifier}` : "Agent đề xuất task"}
                                 </button>
                                 {hulyCreated?.url && <a className="huly-created-link" href={hulyCreated.url} target="_blank" rel="noreferrer">Mở task {hulyCreated.identifier} trên Huly</a>}
                             </div>
@@ -1706,18 +1959,166 @@ export function ChatWorkspace({
             </div>
             {hulyDialogOpen && hulyDraft && (
                 <div className="huly-dialog-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !hulySubmitting) setHulyDialogOpen(false); }}>
-                    <section className="huly-dialog" role="dialog" aria-modal="true" aria-labelledby="huly-dialog-title">
+                    <section className={`huly-dialog is-task-flow-dialog${hulyDialogStage === "proposal" ? " is-proposal-dialog" : ""}`} role="dialog" aria-modal="true" aria-labelledby="huly-dialog-title">
                         <header className="huly-dialog-header">
-                            <div><h2 id="huly-dialog-title">Xác nhận tạo task Huly</h2><p>Chọn project đích và rà nội dung trước khi gửi.</p></div>
+                            <div><h2 id="huly-dialog-title">{{ proposal: "Danh sách task đề xuất", detail: "Chi tiết task", clarify: "Làm rõ BA/PO", configure: "Phân công & Huly", review: "Rà soát trước khi tạo" }[hulyDialogStage]}</h2><p>{hulyDialogStage === "proposal" ? "Rà đề xuất từ BA package và thiết kế đã duyệt; chưa có task nào được tạo." : "Rà soát nội dung và liên kết trước khi tạo task trên Huly."}</p></div>
                             <button className="huly-dialog-close" type="button" onClick={() => setHulyDialogOpen(false)} disabled={hulySubmitting} aria-label="Đóng"><X size={19} /></button>
                         </header>
-                        <div className="huly-dialog-body">
+                        <div className="huly-dialog-body" ref={hulyDialogBodyRef}>
+                            <nav className="huly-flow-steps" aria-label="Các bước tạo task Huly">
+                                {([ ["proposal", "Đề xuất"], ["detail", "Chi tiết task"], ["clarify", "Làm rõ BA/PO"], ["configure", "Phân công & Huly"], ["review", "Rà soát"] ] as const).map(([step, label], index) => {
+                                    const stages = ["proposal", "detail", "clarify", "configure", "review"];
+                                    const currentIndex = stages.indexOf(hulyDialogStage);
+                                    const stepIndex = stages.indexOf(step);
+                                    const skippedClarify = step === "clarify" && !hulyProposal?.proposal.open_questions.length;
+                                    return <button key={step} type="button" className={`${step === hulyDialogStage ? "is-current" : ""}${stepIndex < currentIndex ? " is-done" : ""}${skippedClarify ? " is-skipped" : ""}`} onClick={() => { if (stepIndex < currentIndex) setHulyDialogStage(step); }} disabled={stepIndex >= currentIndex || skippedClarify}><span>{index + 1}</span>{label}</button>;
+                                })}
+                            </nav>
+                            {hulyDialogStage === "proposal" && <div className="huly-proposal-content">
+                                {hulyLoading && <div className="huly-proposal-loading"><LoaderCircle className="huly-spinner" size={20} /> Đang phân tích BA package và thiết kế đã duyệt…</div>}
+                                {!hulyLoading && hulyProposalError && <div className="huly-source-status is-missing"><strong>Chưa tạo được đề xuất task</strong><span>{hulyProposalError}</span><span>Anh có thể tiếp tục với bản nháp một task hiện tại.</span></div>}
+                                {!hulyLoading && hulyProposal && <>
+                                    {hulyProposal.proposal_mode === "fallback" && <div className="huly-proposal-fallback"><span className="huly-fallback-dot" /><span><strong>Bản nháp dự phòng</strong> · {hulyProposal.proposal_notice || "AI chưa phân tích được; hãy rà lại trước khi tạo."}</span></div>}
+                                    <div className="huly-proposal-heading"><div><Sparkles size={17} /><strong>{hulyProposal.proposal_mode === "fallback" ? "Task từ thiết kế đã duyệt" : "Đề xuất task"}</strong></div><span>{hulyProposal.proposal.tasks.length} task <i /> {hulyProposal.source_meta.approved_screens.length} màn hình đã duyệt</span></div>
+                                    {hulyProposal.proposal.open_questions.length > 0 && <section className="huly-proposal-questions"><strong>Điểm BA/PO cần xác nhận</strong>{hulyProposal.proposal.open_questions.map((question, index) => <div key={`${question.question}-${index}`}><b>{question.question}</b><span>{question.reason}</span><small>Ảnh hưởng: {question.affected_task_keys.join(", ") || "Cần xác nhận trước khi triển khai"}</small></div>)}</section>}
+                                    <div className="huly-proposal-workbench huly-proposal-pick-stage">
+                                        <div className="huly-proposal-list-wrap">
+                                            <div className="huly-section-label">DANH SÁCH TASK <small>{hulyProposal.proposal.tasks.length}</small></div>
+                                            <div className="huly-proposal-list">
+                                                {hulyProposal.proposal.tasks.map((task) => <article key={task.key} className={`huly-proposal-card${selectedProposalKeys.includes(task.key) ? " is-selected" : ""}`}>
+                                                    <label className="huly-proposal-check"><input type="checkbox" checked={selectedProposalKeys.includes(task.key)} onChange={(event) => toggleProposalTask(task.key, event.target.checked)} aria-label={`Chọn ${task.title}`} /></label>
+                                                    <button type="button" className="huly-proposal-card-main" onClick={() => { setSelectedProposalKey(task.key); setHulyDialogStage("detail"); }}>
+                                                        <span className="huly-proposal-card-top"><b className="huly-role-badge">{hulyProposal.proposal_mode === "fallback" ? "Bản nháp" : proposalWorkstreamLabel[task.role] || "Đầu việc"}</b><strong>{task.title}</strong><small className={`huly-priority is-${task.priority}`}>{proposalPriorityLabel[task.priority]}</small></span>
+                                                        <span className="huly-outcome-label">Kết quả công việc</span><span className="huly-proposal-outcome">{task.outcome}</span>
+                                                        <span className="huly-proposal-meta">{task.dependency_keys.length ? `${task.dependency_keys.length} phụ thuộc` : "Chưa có phụ thuộc"} <i /> {task.source_refs.length} nguồn <em>Xem chi tiết →</em></span>
+                                                    </button>
+                                                </article>)}
+                                            </div>
+                                        </div>
+                                        <aside className="huly-selection-summary">
+                                            <div className="huly-section-label">TÓM TẮT LỰA CHỌN</div>
+                                            <strong>{selectedProposedTasks.length} / {hulyProposal.proposal.tasks.length} task</strong>
+                                            <span>{hulyProposal.source_meta.approved_screens.length} màn hình đã duyệt</span>
+                                            <div className="huly-selection-metrics"><span>High <b>{selectedProposedTasks.filter((task) => task.priority === "high").length}</b></span><span>Medium <b>{selectedProposedTasks.filter((task) => task.priority === "medium").length}</b></span><span>Chưa đề xuất <b>{selectedProposedTasks.filter((task) => task.priority === "none").length}</b></span><span>Câu hỏi BA/PO <b>{hulyProposal.proposal.open_questions.length}</b></span></div>
+                                            {selectedProposedTasks.length === 0 && <p className="huly-selection-warning">Chọn ít nhất một task để tiếp tục.</p>}
+                                        </aside>
+                                    </div>
+                                    <p className="huly-proposal-note">Chọn task cần tạo. Khi chọn task có dependency, các task tiên quyết sẽ được chọn kèm theo.</p>
+                                </>}
+                            </div>}
+                            {hulyDialogStage === "detail" && selectedProposedTask && <div className="huly-stage-content">
+                                <button className="huly-back-proposal" type="button" onClick={() => setHulyDialogStage("proposal")}>← Quay lại danh sách task</button>
+                                <div className="huly-stage-heading"><div><span className="huly-role-badge">{proposalWorkstreamLabel[selectedProposedTask.role] || "Đầu việc"}</span><h3>{selectedProposedTask.title}</h3></div><span>Task {Math.max(1, hulyProposal?.proposal.tasks.findIndex((task) => task.key === selectedProposedTask.key) ?? 0) + 1} / {hulyProposal?.proposal.tasks.length ?? 0}</span></div>
+                                <div className="huly-detail-grid">
+                                    <section className="huly-proposal-editor">
+                                        <div className="huly-section-label">NỘI DUNG TASK</div>
+                                        <label className="huly-field"><span>Tên task</span><input value={selectedProposedTask.title} maxLength={240} onChange={(event) => updateProposedTask(selectedProposedTask.key, { title: event.target.value })} /></label>
+                                        <label className="huly-field"><span>Kết quả cần đạt</span><textarea rows={3} value={selectedProposedTask.outcome} onChange={(event) => updateProposedTask(selectedProposedTask.key, { outcome: event.target.value })} /></label>
+                                        <div className="huly-proposal-edit-grid">
+                                            <label className="huly-field"><span>Phạm vi triển khai</span><textarea rows={5} value={selectedProposedTask.scope_in.join("\n")} onChange={(event) => updateProposedTask(selectedProposedTask.key, { scope_in: event.target.value.split("\n").map((value) => value.trim()).filter(Boolean) })} /></label>
+                                            <label className="huly-field"><span>Ngoài phạm vi</span><textarea rows={5} value={selectedProposedTask.scope_out.join("\n")} onChange={(event) => updateProposedTask(selectedProposedTask.key, { scope_out: event.target.value.split("\n").map((value) => value.trim()).filter(Boolean) })} /></label>
+                                            <label className="huly-field huly-criteria-field"><span>Tiêu chí nghiệm thu</span><textarea rows={6} value={selectedProposedTask.acceptance_criteria.join("\n")} onChange={(event) => updateProposedTask(selectedProposedTask.key, { acceptance_criteria: event.target.value.split("\n").map((value) => value.trim()).filter(Boolean) })} /></label>
+                                        </div>
+                                    </section>
+                                    <aside className="huly-detail-aside">
+                                        <section className="huly-proposal-rationale-panel"><span className="huly-section-label">LÝ DO ƯU TIÊN</span><strong className={`huly-priority is-${selectedProposedTask.priority}`}>{proposalPriorityLabel[selectedProposedTask.priority]}</strong><p>{selectedProposedTask.priority_rationale}</p></section>
+                                        <section className="huly-source-panel"><div className="huly-section-label">CĂN CỨ CÔNG VIỆC <small>{selectedProposedTask.source_refs.length} mục</small></div><p className="huly-source-summary">Đề xuất dựa trên yêu cầu BA và thiết kế đã duyệt.</p><details className="huly-source-details"><summary>Xem nội dung tham chiếu</summary><ul>{selectedProposedTask.source_refs.map((ref) => <li key={ref} title={hulyProposal?.sources[ref] || ref}>{hulyProposal?.sources[ref] || ref}</li>)}</ul></details></section>
+                                        <section className="huly-source-panel"><div className="huly-section-label">TÀI LIỆU ĐÍNH KÈM <small>{hulyArtifacts?.screens.length ?? 0} màn hình</small></div><div className="huly-attachment-chips huly-attachment-chips-compact">
+                                            <button type="button" className="huly-attachment-chip" onClick={() => { setHulyPreviewIndex(0); setHulyPreviewZoom(1); setHulyPreviewTab("png"); }} disabled={!hulyArtifacts?.screens.length}><Image size={15} /><span>PNG thiết kế</span></button>
+                                            <button type="button" className="huly-attachment-chip" onClick={() => setHulyPreviewTab("spec")} disabled={!hulyArtifacts}><FileText size={15} /><span>UI spec.md</span></button>
+                                            <button type="button" className="huly-attachment-chip" onClick={() => setHulyPreviewTab("tokens")} disabled={!hulyArtifacts?.design_tokens}><Braces size={15} /><span>Style contract</span></button>
+                                        </div></section>
+                                    </aside>
+                                </div>
+                            </div>}
+                            {hulyDialogStage === "clarify" && <div className="huly-stage-content">
+                                <button className="huly-back-proposal" type="button" onClick={() => setHulyDialogStage("detail")}>← Quay lại task</button>
+                                <div className="huly-stage-heading"><div><span className="huly-role-badge">BA / PO</span><h3>Làm rõ trước khi tạo task</h3></div><span>{hulyProposal?.proposal.open_questions.length ?? 0} câu hỏi</span></div>
+                                <p className="huly-stage-intro">Chọn cách xử lý cho từng điểm chưa rõ. Câu trả lời sẽ được ghi vào task liên quan để người thực hiện có đủ ngữ cảnh.</p>
+                                {!hulyProposal?.proposal.open_questions.length ? <div className="huly-empty-state"><Check size={18} /> Không có câu hỏi BA/PO đang mở cho đề xuất này.</div> : hulyProposal.proposal.open_questions.map((question, index) => <section className="huly-clarification-card" key={`${question.question}-${index}`}>
+                                    <div><span className="huly-section-label">CÂU HỎI {index + 1}</span><h4>{question.question}</h4><p>{question.reason}</p><small>Ảnh hưởng: {question.affected_task_keys.map((key) => hulyProposal.proposal.tasks.find((task) => task.key === key)?.title || key).join(" · ") || "Toàn bộ task được chọn"}</small></div>
+                                    <div className="huly-clarification-options">
+                                        <label className={clarificationDecisions[index] === "confirm" ? "is-selected" : ""}><input type="radio" name={`clarification-${index}`} checked={clarificationDecisions[index] === "confirm"} onChange={() => setClarificationDecisions((current) => ({ ...current, [index]: "confirm" }))} /><span><b>Đã có quyết định</b><small>Ghi câu trả lời BA/PO bên dưới</small></span></label>
+                                        <label className={clarificationDecisions[index] === "defer" ? "is-selected" : ""}><input type="radio" name={`clarification-${index}`} checked={clarificationDecisions[index] === "defer"} onChange={() => setClarificationDecisions((current) => ({ ...current, [index]: "defer" }))} /><span><b>Để mở và ghi chú vào task</b><small>Người nhận task cần xác nhận sau</small></span></label>
+                                        <label className={clarificationDecisions[index] === "exclude" ? "is-selected" : ""}><input type="radio" name={`clarification-${index}`} checked={clarificationDecisions[index] === "exclude"} onChange={() => setClarificationDecisions((current) => ({ ...current, [index]: "exclude" }))} /><span><b>Bỏ task bị ảnh hưởng</b><small>Không tạo các task liên quan câu hỏi này</small></span></label>
+                                    </div>
+                                    {clarificationDecisions[index] === "confirm" && <label className="huly-field"><span>Quyết định BA/PO</span><textarea rows={3} value={clarificationAnswers[index] ?? ""} onChange={(event) => setClarificationAnswers((current) => ({ ...current, [index]: event.target.value }))} placeholder="Nhập câu trả lời đã được xác nhận..." /></label>}
+                                </section>)}
+                            </div>}
+                            {hulyDialogStage === "configure" && <div className="huly-stage-content">
+                                <button className="huly-back-proposal" type="button" onClick={() => setHulyDialogStage(hulyProposal?.proposal.open_questions.length ? "clarify" : "detail")}>← Quay lại bước trước</button>
+                                <div className="huly-stage-heading"><div><span className="huly-role-badge">HULY</span><h3>Phân công & Huly</h3></div><span>{selectedProposedTasks.length} task được chọn</span></div>
+                                <div className="huly-config-shared-grid">
+                                    <label className="huly-field"><span>Project Huly *</span><select value={hulyProjectId} onChange={(event) => setHulyProjectId(event.target.value)} disabled={hulySubmitting}>{hulyProjects.map((project) => <option key={project.id} value={project.id}>{project.name} ({project.identifier})</option>)}</select></label>
+                                    <label className="huly-field"><span>Epic cha <small>Tùy chọn</small></span><select value={hulyEpicId} onChange={(event) => setHulyEpicId(event.target.value)} disabled={hulyEpicsLoading || hulySubmitting || !hulyProjectId}><option value="">Không gắn Epic</option>{hulyEpics.map((epic) => <option key={epic.identifier} value={epic.identifier}>{epic.identifier} · {epic.title}</option>)}</select>{hulyEpicError && <small className="huly-field-error">{hulyEpicError}</small>}</label>
+                                </div>
+                                {hulyMetadataLoading && <p className="huly-metadata-loading">Đang đọc workflow và metadata từ Huly…</p>}
+                                {!hulyMetadataLoading && hulyMetadata && <div className="huly-task-config-list">{selectedProposedTasks.map((task) => {
+                                    const config = hulyTaskConfigs[task.key] ?? { assignee: "", due_date: "", priority: task.priority, status: hulyMetadata.default_status, task_type: hulyMetadata.task_types[0]?.name || "", labels: [], component: "", milestone: "", estimation_hours: null, dependency_keys: task.dependency_keys, related_issue_ids: [] };
+                                    const candidates = selectedProposedTasks.filter((candidate) => candidate.key !== task.key);
+                                    const selectedRelated = config.related_issue_ids.map((id) => relatedOptions[task.key]?.find((issue) => issue.identifier === id) || { identifier: id, title: id });
+                                    return <article className="huly-task-config-card" key={task.key}>
+                                        <header><span className="huly-role-badge">{proposalWorkstreamLabel[task.role] || "Đầu việc"}</span><strong>{task.title}</strong><span className={`huly-priority is-${config.priority}`}>{proposalPriorityLabel[config.priority]}</span></header>
+                                        <div className="huly-task-config-fields">
+                                            <label className="huly-field"><span>Người nhận *</span><select value={config.assignee} onChange={(event) => updateTaskConfig(task.key, { assignee: event.target.value })}><option value="">Chọn người nhận</option>{hulyMembers.map((member) => <option key={member.email || member.name} value={member.name}>{member.name}</option>)}</select></label>
+                                            <label className="huly-field"><span>Deadline *</span><input type="date" value={config.due_date} onChange={(event) => updateTaskConfig(task.key, { due_date: event.target.value })} /></label>
+                                            <label className="huly-field"><span>Ưu tiên *</span><select value={config.priority} onChange={(event) => updateTaskConfig(task.key, { priority: event.target.value as HulyTaskConfig["priority"] })}><option value="none">Chọn mức</option><option value="urgent">Urgent</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
+                                            <label className="huly-field"><span>Trạng thái · Huly</span><select value={config.status} onChange={(event) => updateTaskConfig(task.key, { status: event.target.value })}>{hulyMetadata.statuses.map((option) => { const value = option.name || option.title || option.identifier || option.id || ""; return <option key={value} value={value}>{option.name || option.title || option.identifier || value}</option>; })}</select></label>
+                                            <details className="huly-native-extra"><summary>Metadata Huly và liên kết khác</summary><div className="huly-task-config-fields">
+                                                <label className="huly-field"><span>Loại task</span><select value={config.task_type} onChange={(event) => updateTaskConfig(task.key, { task_type: event.target.value })}>{hulyMetadata.task_types.map((option) => { const value = option.name || option.title || option.identifier || option.id || ""; return <option key={value} value={value}>{option.name || option.title || option.identifier || value}</option>; })}</select></label>
+                                                {hulyMetadata.components.length > 0 && <label className="huly-field"><span>Component</span><select value={config.component} onChange={(event) => updateTaskConfig(task.key, { component: event.target.value })}><option value="">Không chọn</option>{hulyMetadata.components.map((option) => { const value = option.name || option.title || option.identifier || option.id || ""; return <option key={value} value={value}>{option.name || option.title || option.identifier || value}</option>; })}</select></label>}
+                                                {hulyMetadata.milestones.length > 0 && <label className="huly-field"><span>Milestone</span><select value={config.milestone} onChange={(event) => updateTaskConfig(task.key, { milestone: event.target.value })}><option value="">Không chọn</option>{hulyMetadata.milestones.map((option) => { const value = option.name || option.title || option.identifier || option.id || ""; return <option key={value} value={value}>{option.name || option.title || option.identifier || value}</option>; })}</select></label>}
+                                                <label className="huly-field"><span>Estimation (giờ)</span><input type="number" min="0" step="0.5" value={config.estimation_hours ?? ""} onChange={(event) => updateTaskConfig(task.key, { estimation_hours: event.target.value === "" ? null : Number(event.target.value) })} placeholder="Chưa ước lượng" /></label>
+                                            </div>
+                                            {hulyMetadata.labels.length > 0 && <fieldset className="huly-label-options"><legend>Labels</legend>{hulyMetadata.labels.map((option) => { const value = option.name || option.title || option.identifier || option.id || ""; return <label key={value}><input type="checkbox" checked={config.labels.includes(value)} onChange={(event) => updateTaskConfig(task.key, { labels: event.target.checked ? [...config.labels, value] : config.labels.filter((label) => label !== value) })} />{option.name || option.title || value}</label>; })}</fieldset>}
+                                            {hulyMetadata.labels.length === 0 && <small className="huly-field-hint">Project chưa có label nào được cấu hình trong Huly.</small>}
+                                            <div className="huly-related-picker"><label className="huly-field"><span>Issue liên quan · Related</span><input value={relatedQueries[task.key] || ""} onChange={(event) => void searchRelatedIssues(task.key, event.target.value)} placeholder="Tìm theo mã hoặc tiêu đề Huly…" /></label>{(relatedOptions[task.key] || []).filter((issue) => !config.related_issue_ids.includes(issue.identifier)).map((issue) => <button type="button" key={issue.identifier} onClick={() => { updateTaskConfig(task.key, { related_issue_ids: [...config.related_issue_ids, issue.identifier] }); setRelatedQueries((current) => ({ ...current, [task.key]: "" })); setRelatedOptions((current) => ({ ...current, [task.key]: [] })); }}>{issue.identifier} · {issue.title}</button>)}<div className="huly-related-chips">{selectedRelated.map((issue) => <button type="button" key={issue.identifier} onClick={() => updateTaskConfig(task.key, { related_issue_ids: config.related_issue_ids.filter((id) => id !== issue.identifier) })}>{issue.identifier} ×</button>)}</div></div>
+                                            </details>
+                                            <details className="huly-dependency-picker"><summary>Dependency nội bộ · {config.dependency_keys.length || "không có"}</summary>{candidates.length ? candidates.map((candidate) => <label key={candidate.key}><input type="checkbox" checked={config.dependency_keys.includes(candidate.key)} onChange={(event) => updateTaskConfig(task.key, { dependency_keys: event.target.checked ? [...config.dependency_keys, candidate.key] : config.dependency_keys.filter((key) => key !== candidate.key) })} />{proposalWorkstreamLabel[candidate.role] || "Đầu việc"} · {candidate.title}</label>) : <small>Không có đầu việc khác để liên kết.</small>}</details>
+                                        </div>
+                                    </article>;
+                                })}</div>}                                {hulyError && <p className="huly-dialog-error" role="alert">{hulyError}</p>}
+                            </div>}
+                            {hulyDialogStage === "review" && <div className="huly-stage-content">
+                                <button className="huly-back-proposal" type="button" onClick={() => setHulyDialogStage("configure")}>← Quay lại phân công</button>
+                                <div className="huly-stage-heading"><div><span className="huly-role-badge">RÀ SOÁT</span><h3>Phân công {selectedProposedTasks.length} task trong Huly</h3></div><span>Chưa tạo task</span></div>
+                                <div className="huly-review-summary"><strong>{selectedProposedTasks.length} task được chọn</strong><span>{hulyProjects.find((project) => project.id === hulyProjectId)?.name || "Chưa chọn project"}{hulyEpicId ? ` · Epic ${hulyEpicId}` : " · Không gắn Epic"}</span></div>
+                                <div className="huly-bulk-table-wrap"><table className="huly-bulk-table huly-review-table"><thead><tr><th>#</th><th>Nội dung task</th><th>Người nhận</th><th>Deadline</th><th>Ưu tiên</th><th>Trạng thái</th><th>Dependency</th></tr></thead><tbody>{selectedProposedTasks.map((task, index) => { const config = hulyTaskConfigs[task.key]; return <tr key={task.key}><td>{index + 1}</td><td><span className="huly-bulk-role">{task.role}</span><strong>{task.title}</strong></td><td>{hulyMembers.find((member) => member.name === config?.assignee)?.name || "Chưa giao"}</td><td>{config?.due_date || "Chưa đặt"}</td><td><span className={`huly-priority is-${config?.priority ?? "none"}`}>{proposalPriorityLabel[config?.priority ?? "none"]}</span></td><td>{config?.status || "Todo"}</td><td>{config?.dependency_keys.map((key) => hulyProposal?.proposal.tasks.find((candidate) => candidate.key === key)?.title || key).join(", ") || "Không có"}</td></tr>; })}</tbody></table></div>
+                                {hulyBulkCreated && <div className="huly-source-status is-linked"><strong>Đã tạo {hulyBulkCreated.created.length}/{selectedProposedTasks.length} task</strong>{hulyBulkCreated.created.map((item) => <div key={item.key}>{item.url ? <a href={item.url} target="_blank" rel="noreferrer">{item.identifier}</a> : <strong>{item.identifier}</strong>}{item.relation_errors.map((error, index) => <span className="huly-dialog-error" key={`${item.key}-relation-${index}`}>{error}</span>)}</div>)}{hulyBulkCreated.errors.map((item) => <span className="huly-dialog-error" key={item.key}>{item.title}: {item.error}</span>)}</div>}
+                                {hulyError && <p className="huly-dialog-error" role="alert">{hulyError}</p>}
+                            </div>}
+                            <div className="huly-create-fields" style={{ display: "none" }}>
+                            <button className="huly-back-proposal" type="button" onClick={() => setHulyDialogStage("proposal")}>← Quay lại đề xuất task</button>
                             <label className="huly-field"><span>Project Huly</span>
                                 <select value={hulyProjectId} onChange={(event) => setHulyProjectId(event.target.value)} disabled={hulyLoading || hulySubmitting || hulyProjects.length === 0}>
                                     {hulyProjects.length === 0 && <option value="">{hulyLoading ? "Đang tải project..." : "Không có project khả dụng"}</option>}
                                     {hulyProjects.map((project) => <option key={project.id} value={project.id}>{project.name}{project.identifier ? ` (${project.identifier})` : ""}</option>)}
                                 </select>
                             </label>
+                            <label className="huly-field"><span>Epic cha <small>Tùy chọn</small></span>
+                                <select value={hulyEpicId} onChange={(event) => { setHulyEpicId(event.target.value); setHulyDraft({ ...hulyDraft, epic_id: event.target.value }); }} disabled={hulyEpicsLoading || hulySubmitting || !hulyProjectId}>
+                                    <option value="">Không gắn Epic</option>
+                                    {hulyEpics.map((epic) => <option key={epic.identifier} value={epic.identifier}>{epic.identifier} · {epic.title}</option>)}
+                                </select>
+                                {hulyEpicsLoading && <small className="huly-field-hint">Đang tải Epic của project...</small>}
+                                {hulyEpicError && <small className="huly-field-error">{hulyEpicError}</small>}
+                            </label>
+                            <div className="huly-task-meta-grid">
+                                <label className="huly-field"><span>Người được giao</span>
+                                    <select value={hulyDraft.assignee} onChange={(event) => setHulyDraft({ ...hulyDraft, assignee: event.target.value })} disabled={hulyLoading || hulySubmitting}>
+                                        <option value="">Chưa giao</option>
+                                        {hulyMembers.map((member) => <option key={member.email || member.name} value={member.name}>{member.name}{member.email ? ` · ${member.email}` : ""}</option>)}
+                                    </select>
+                                </label>
+                                <label className="huly-field"><span>Priority</span>
+                                    <select value={hulyDraft.priority} onChange={(event) => setHulyDraft({ ...hulyDraft, priority: event.target.value as HulyIssueDraft["priority"] })} disabled={hulySubmitting}>
+                                        <option value="urgent">Urgent</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option><option value="none">Chưa đặt</option>
+                                    </select>
+                                </label>
+                                <label className="huly-field"><span>Deadline</span>
+                                    <input type="date" value={hulyDraft.due_date} onChange={(event) => setHulyDraft({ ...hulyDraft, due_date: event.target.value })} disabled={hulySubmitting} />
+                                </label>
+                            </div>
                             <label className="huly-field"><span>Tên task <small>{hulyDraft.title.length}/80 ký tự khuyến nghị</small></span><input value={hulyDraft.title} maxLength={240} onChange={(event) => setHulyDraft({ ...hulyDraft, title: event.target.value })} /></label>
                             <label className="huly-field"><span>Mục tiêu</span><textarea rows={6} value={hulyDraft.objective} onChange={(event) => setHulyDraft({ ...hulyDraft, objective: event.target.value })} /></label>
                             <label className="huly-field"><span>Hiện trạng</span><textarea rows={6} value={hulyDraft.current_state} onChange={(event) => setHulyDraft({ ...hulyDraft, current_state: event.target.value })} /></label>
@@ -1746,16 +2147,18 @@ export function ChatWorkspace({
                                 <p className="huly-preview-note">Xem trước artifact đã tạo từ thiết kế được duyệt.</p>
                             </section>
                             {hulyError && <p className="huly-dialog-error" role="alert">{hulyError}</p>}
-                            {hulyCreated && <p className="huly-dialog-success" role="status">Đã tạo task {hulyCreated.identifier} và đính kèm {hulyCreated.attachments?.length ?? 0} tài liệu.</p>}
+                            {hulyCreated && <p className="huly-dialog-success" role="status">Đã tạo task {hulyCreated.identifier}{hulyCreated.parent_epic ? ` và gắn vào Epic ${hulyCreated.parent_epic}` : ""}; đính kèm {hulyCreated.attachments?.length ?? 0} tài liệu.</p>}
+                            {hulyCreated?.parent_error && <p className="huly-dialog-error" role="alert">Task {hulyCreated.identifier} đã được tạo nhưng chưa gắn được vào Epic: {hulyCreated.parent_error} Mở task trên Huly để gắn Epic thủ công; không gửi lại form để tránh tạo trùng.</p>}
                             {Boolean(hulyCreated?.attachment_errors?.length) && <p className="huly-dialog-error" role="alert">Task đã được tạo nhưng một số file chưa đính kèm: {hulyCreated?.attachment_errors?.map((item) => item.filename).join(", ")}. Mở task Huly để kiểm tra trước khi thử lại.</p>}
+                            </div>
                         </div>
-                        <footer className="huly-dialog-footer">
+                        <footer className="huly-dialog-footer huly-flow-footer">
                             <button className="chat-review-btn" type="button" onClick={() => setHulyDialogOpen(false)} disabled={hulySubmitting}>Đóng</button>
-                            {hulyCreated ? (hulyCreated.url && <a className="chat-review-btn approve" href={hulyCreated.url} target="_blank" rel="noreferrer">Mở task trên Huly</a>) : (
-                                <button className="chat-review-btn approve" type="button" onClick={submitHulyIssue} disabled={hulyLoading || hulySubmitting || !hulyProjectId || !hulyDraft.title.trim() || !hulyDraft.objective.trim() || !hulyDraft.current_state.trim() || !hulyDraft.solution.trim() || !hulyDraft.acceptance_criteria.trim()}>
-                                    {hulySubmitting ? <><LoaderCircle className="huly-spinner" size={15} /> Đang tạo...</> : <><Check size={15} /> Xác nhận & tạo task</>}
-                                </button>
-                            )}
+                            {hulyDialogStage === "proposal" && <button className="chat-review-btn approve" type="button" onClick={continueWithSelectedProposal} disabled={!selectedProposedTasks.length}>Xem chi tiết task →</button>}
+                            {hulyDialogStage === "detail" && <><button className="chat-review-btn" type="button" onClick={() => setHulyDialogStage("proposal")}>Quay lại danh sách</button><button className="chat-review-btn approve" type="button" onClick={() => { setHulyError(""); setHulyDialogStage(hulyProposal?.proposal.open_questions.length ? "clarify" : "configure"); }} disabled={!selectedProposedTasks.length}>Tiếp tục: {hulyProposal?.proposal.open_questions.length ? "làm rõ BA/PO" : "phân công"} →</button></>}
+                            {hulyDialogStage === "clarify" && <><button className="chat-review-btn" type="button" onClick={() => setHulyDialogStage("detail")}>Quay lại task</button><button className="chat-review-btn approve" type="button" onClick={continueFromClarifications}>Tiếp tục cấu hình →</button></>}
+                            {hulyDialogStage === "configure" && <><button className="chat-review-btn" type="button" onClick={() => setHulyDialogStage(hulyProposal?.proposal.open_questions.length ? "clarify" : "detail")}>Quay lại bước trước</button><button className="chat-review-btn approve" type="button" onClick={() => { setHulyError(""); setHulyDialogStage("review"); }} disabled={!selectedProposedTasks.length}>Rà soát lựa chọn →</button></>}
+                            {hulyDialogStage === "review" && (hulyBulkCreated ? <button className="chat-review-btn approve" type="button" onClick={() => setHulyDialogOpen(false)}>Hoàn tất</button> : <><button className="chat-review-btn" type="button" onClick={() => setHulyDialogStage("configure")}>Quay lại phân công</button><button className="chat-review-btn approve" type="button" onClick={submitHulyIssues} disabled={hulySubmitting || !selectedProposedTasks.length || !hulyProjectId || selectedProposedTasks.some((task) => { const config = hulyTaskConfigs[task.key]; return !config?.assignee || !config?.due_date || config.priority === "none"; })}>{hulySubmitting ? <><LoaderCircle className="huly-spinner" size={15} /> Đang tạo task...</> : <>✓ Tạo {selectedProposedTasks.length} task trên Huly</>}</button></>)}
                         </footer>
                     </section>
                 </div>

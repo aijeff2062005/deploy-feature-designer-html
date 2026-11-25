@@ -82,3 +82,70 @@ def test_lint_reports_overflow_clipped_text_and_empty_region():
     assert {f["rule"] for f in result.blocking} == {"page-overflow", "clipped-text", "clipped-content"}
     assert any("Tiếp đón ngay" in e["text"] for e in rules["clipped-content"]["elements"])
     assert all("data-d" not in e["html"] for f in result.findings for e in f["elements"])
+
+
+def test_strict_visual_quality_detects_gradient_on_background_descendant():
+    fragment = """
+    <main class="relative min-h-screen overflow-hidden bg-white">
+      <div data-preview-background aria-hidden="true" class="pointer-events-none absolute inset-0">
+        <div class="absolute inset-0" style="background-image: radial-gradient(circle at 20% 10%, #dbeafe, transparent 60%), linear-gradient(145deg, #f8fafc, #eff6ff);"></div>
+      </div>
+      <section class="relative z-10 p-8"><h1>Project screen</h1><button>Continue</button></section>
+    </main>
+    """
+    result = render(fragment, width=390, height=844, screenshot=None, axe=False, strict_visual_quality=True)
+    assert "background-treatment" not in {finding["rule"] for finding in result.blocking}
+
+
+def test_decorative_fixed_background_is_not_reported_as_sticky_footer():
+    fragment = """
+    <main class="relative min-h-[1400px]">
+      <div aria-hidden="true" class="fixed inset-0 pointer-events-none z-0">
+        <svg viewBox="0 0 100 100" class="h-full w-full"><circle cx="50" cy="50" r="40" /></svg>
+      </div>
+      <section class="relative z-10 p-8"><h1>Đăng ký</h1><button>Tiếp tục</button></section>
+    </main>
+    """
+    result = render(fragment, width=390, height=844, screenshot=None, axe=False)
+    assert "sticky-footer-overlap" not in {finding["rule"] for finding in result.findings}
+
+
+def test_fixed_action_footer_covering_scroll_content_is_reported():
+    fragment = """
+    <main class="min-h-[1400px] p-8">
+      <h1>Đăng ký</h1><button style="margin-top: 740px">Continue form</button>
+      <p>Form content after the initial viewport.</p>
+    </main>
+    <footer class="fixed bottom-0 left-0 right-0 h-24 bg-white p-4">
+      <button>Submit</button>
+    </footer>
+    """
+    result = render(fragment, width=390, height=844, screenshot=None, axe=False)
+    assert "sticky-footer-overlap" in {finding["rule"] for finding in result.findings}
+
+
+def test_conditional_first_paint_finding_identifies_the_visible_leaking_element():
+    fragment = """
+    <main x-data="{ verified: false }">
+      <h1>Payment method</h1>
+      <button x-show="true">Continue verification</button>
+      <p x-show="verified">Verification complete</p>
+    </main>
+    """
+    result = render(fragment, width=390, screenshot=None, axe=False,
+                    forbiddenTexts=["Continue verification", "Verification complete"])
+    finding = next(item for item in result.findings if item["rule"] == "conditional-content-on-first-paint")
+    assert finding["count"] == 1
+    assert finding["elements"]
+    assert any("Continue verification" in item["html"] for item in finding["elements"])
+    assert finding["elements"][0]["conditionalText"] == "Continue verification"
+
+
+def test_conditional_first_paint_finding_identifies_placeholder_copy():
+    result = render(
+        '<main><label for="code">Code</label><input id="code" placeholder="Enter verification code"></main>',
+        width=390, screenshot=None, axe=False, forbiddenTexts=["Enter verification code"],
+    )
+    finding = next(item for item in result.findings if item["rule"] == "conditional-content-on-first-paint")
+    assert finding["elements"]
+    assert any(item["conditionalText"] == "Enter verification code" for item in finding["elements"])

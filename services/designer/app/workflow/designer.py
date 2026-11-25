@@ -17,9 +17,11 @@ import base64
 import dataclasses
 import functools
 import hashlib
+import html as html_lib
 import inspect
 import json
 import logging
+import math
 import re
 import time
 from contextvars import ContextVar
@@ -266,6 +268,16 @@ def _clip(text: str, limit: int) -> str:
 
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def _invalid_navigation_targets(markup: str, spec: UiSpec) -> list[str]:
+    """Return prototype links that do not reference a real screen in this flow."""
+    allowed = {screen.id for screen in spec.screens}
+    targets = [html_lib.unescape(value).strip() for _, value in re.findall(
+        r"\bdata-goto\s*=\s*(['\"])(.*?)\1", markup, flags=re.I | re.S
+    )]
+    invalid = list(dict.fromkeys(target for target in targets if target and target not in allowed))
+    return invalid
 
 
 def _copy_key(text: str) -> str:
@@ -719,8 +731,8 @@ class HtmlDesigner:
                 lines.append(f"Designer: {_clip(r.assistant_message, 800)}")
         return "\n".join(lines) or "(none)"
 
-    async def _design_text(self, design: DesignContext, query: str = "") -> str:
-        """Imported design system tokens and real Figma component snippets relevant to ``query``."""
+    def _design_text(self, design: DesignContext, query: str = "") -> str:
+        """Imported semantic tokens and relevant component names; never inject source HTML."""
         if design.id == DEFAULT_DESIGN_SYSTEM or not design.components:
             return "None imported: use the art direction and the theme tokens."
         tokens = [line.strip().split(":")[0][2:] for line in design.theme_css.splitlines()
@@ -728,7 +740,7 @@ class HtmlDesigner:
         colors = [t.removeprefix("color-") for t in tokens if t.startswith("color-")][-40:]
         texts = sorted({t.removeprefix("text-").split("--")[0] for t in tokens if t.startswith("text-")})[:24]
         words = {word for word in re.findall(r"[^\W\d_]+", query.lower(), flags=re.UNICODE) if len(word) > 2}
-        ranked = []
+        documents = []
         for component in design.components:
             searchable = " ".join([
                 str(component.get("name", "")), str(component.get("description", "")),
@@ -738,48 +750,36 @@ class HtmlDesigner:
                          for variant in (component.get("variants") or [])),
             ]).lower()
             component_words = set(re.findall(r"[^\W\d_]+", searchable, flags=re.UNICODE))
-            score = len(words & component_words)
-            if score:
-                ranked.append((score, component))
-        ranked.sort(key=lambda item: (-item[0], str(item[1].get("name", "")).lower()))
-        relevant = [component for _, component in ranked]
+            documents.append((component, component_words))
+        document_frequency = {
+            word: sum(word in component_words for _, component_words in documents)
+            for word in words
+        }
+        term_weights = {
+            word: math.log((len(documents) + 1) / (frequency + 1))
+            for word, frequency in document_frequency.items()
+        }
+        total_query_weight = sum(term_weights.values())
+        ranked = []
+        for component, component_words in documents:
+            matched_weight = sum(term_weights[word] for word in words & component_words)
+            coverage = matched_weight / total_query_weight if total_query_weight else 0
+            if coverage:
+                ranked.append((coverage, component))
+        ranked.sort(key=lambda item: (-item[0], str(item[1].get("name", "")).casefold()))
+        # Use the observed relevance distribution rather than a fixed component-name list
+        # or a fixed number of snippets; common terms are already down-weighted by IDF.
+        relevance_floor = sum(score for score, _ in ranked) / len(ranked) if ranked else 0
+        relevant = [component for score, component in ranked if score >= relevance_floor and score > 0]
         names = ", ".join(
             str(c.get("name") or c.get("id") or "Component")
             + (f" ({'/'.join(c['props'])})" if c.get("props") else "")
             for c in relevant
         ) or "No component matched this screen's name, purpose, content, actions, or variant labels."
-        variants: list[tuple[str, str, str]] = []
-        for component in relevant:
-            for variant in component.get("variants") or []:
-                variant_id = str(variant.get("id") or "")
-                if variant_id:
-                    variants.append((str(component.get("name") or component.get("id") or "Component"),
-                                     variant_id, str(variant.get("props") or {})))
-        snippet_map = await self.store.get_snippets(design.id, [variant_id for _, variant_id, _ in variants])
-        examples = []
-        remaining = 24_000
-        omitted = 0
-        for name, variant_id, props in variants:
-            snippet = snippet_map.get(variant_id, "").strip()
-            if not snippet or remaining <= 0:
-                omitted += bool(snippet)
-                continue
-            if len(snippet) > remaining:
-                omitted += 1
-                snippet = snippet[:remaining]
-            examples.append(f"### {name} · {props}\n```html\n{snippet}\n```")
-            remaining -= len(snippet)
-        example_text = (
-            "\nScreen-relevant Figma component HTML (reuse matching structures/classes and choose the needed "
-            "variants; replace only feature-specific labels/data, and do not force an unrelated component):\n"
-            + "\n".join(examples)
-            if examples else ""
-        )
-        if omitted:
-            example_text += f"\n{omitted} additional matching variant snippet(s) were omitted only to fit the prompt context."
         return (f"{design.name} (imported from Figma) — match its look. Color utilities: {', '.join(colors)}. "
                 f"Text styles: {', '.join('text-' + t for t in texts)}. Screen-relevant components: {names}."
-                f"{example_text}")
+                " Use these as suggestions with the semantic tokens; create screen markup for the requested layout "
+                "without copying or embedding imported component HTML.")
 
     # ── stage 1: route ──
     async def analyze(self, run_id: UUID, feedback: str = "None") -> None:
@@ -1452,7 +1452,7 @@ class HtmlDesigner:
                            f"Visual contract: {candidate.model_dump_json(exclude={'key', 'name', 'tagline', 'direction', 'recommended'})}. "
                            "Make its composition, typography, surfaces, color balance and product-specific visual motif unmistakable; "
                            "do not fall back to a generic form or default style." + reference_instruction),
-                design_system=await self._design_text(design, query),
+                design_system=self._design_text(design, query),
                 skill=knowledge.frontend_design_skill() + "\n\n" + knowledge.style_preview_skill(),
                 design_rules=knowledge.ui_ux_design_rules(),
             )
@@ -1817,7 +1817,7 @@ class HtmlDesigner:
                     if imported else
                     "Use the selected project visual contract palette exactly when present; otherwise choose colors for this product."
                 ),
-                design_system=await self._design_text(design, query),
+                design_system=self._design_text(design, query),
                 brief=json.dumps(spec_brief, ensure_ascii=False),
                 style_selection=(f"{brief.style_name}: {safe_style_direction}".strip(": ")
                                  if brief.style_name or safe_style_direction else "No style selected yet."),
@@ -2035,9 +2035,17 @@ class HtmlDesigner:
         lines = []
         for finding in sorted(result.findings, key=lambda f: {"error": 0, "warning": 1, "info": 2}[f["severity"]])[:MAX_FINDINGS]:
             if finding.get("rule") == "conditional-content-on-first-paint":
+                examples = finding.get("elements", [])
+                details = "; ".join(
+                    f"{node.get('html', '')[:240]} at {node.get('bounds', {})}"
+                    + (f" (conditional text: {node['conditionalText']})" if node.get("conditionalText") else "")
+                    for node in examples[:3]
+                )
                 lines.append(
                     "- ERROR conditional-state-leak: Conditional-only content appears in the default view. "
-                    "Remove the conditional element; keep only approved default-screen content."
+                    "Change only the identified region so conditional content stays hidden until its approved "
+                    "trigger; preserve approved default content and required copy."
+                    + (f" Leaking rendered elements: {details}" if details else "")
                 )
                 continue
             examples = finding.get("elements", [])
@@ -2102,7 +2110,7 @@ class HtmlDesigner:
         system = self.prompts.render(
             "builder", width=width,
             direction=self._direction_text(spec, approved_screen, visual_contract) + reference_instruction,
-            design_system=await self._design_text(design, query), skill=knowledge.frontend_design_skill(),
+            design_system=self._design_text(design, query), skill=knowledge.frontend_design_skill(),
             design_rules=knowledge.ui_ux_design_rules(), style_asset=style_asset,
         )
         usage: dict[str, int] = {}
@@ -2132,7 +2140,10 @@ class HtmlDesigner:
             if re.search(r"chart|graph|trend|biểu đồ|thống kê|report", f"{query} {' '.join(default_screen.get('sections', []))}", re.I):
                 ux += knowledge.chart_rules(query)
                 await self._trace_decision(run, "screen.chart_guidance", "query or approved sections mention charts or reports", "include_chart_rules", {"query": query})
-            others = ", ".join(f"{s.id} ({s.name})" for s in spec.screens if s.id != screen.id) or "(none)"
+            others = "\n".join(
+                f"- Canonical screen ID: {s.id}; screen name: {s.name}"
+                for s in spec.screens
+            ) or "(none)"
             draft = await self._llm_call("generate", trace_name="screen.draft_html",
                 system=system,
                 text=self.prompts.render(
@@ -2154,6 +2165,14 @@ class HtmlDesigner:
             task = "Review this screen you built and finish it."
         result, checks, blocking, score = await self._check(
             html, screen, width, design, session.project_id, approved_screen)
+
+        def blocking_signature(check_result) -> tuple[tuple[str, str], ...]:
+            return tuple(sorted(
+                (str(item.get("rule", "")), str(item.get("message", "")))
+                for item in check_result.blocking
+            ))
+
+        accepted_blockers = blocking_signature(result)
         for round_no in range(max(1, settings.designer_review_rounds)):
             if round_no and not blocking:
                 await self._trace_decision(run, "screen.review_loop", "round_no > 0 and blocking == false", "stop_review_rounds", {
@@ -2186,19 +2205,34 @@ class HtmlDesigner:
                 # Keep an edit only if it does not make the screen worse (lost texts, new blocking errors).
                 candidate_html = await save(edit.html, f"review candidate {round_no + 1}")
                 candidate = await self._check(candidate_html, screen, width, design, session.project_id, approved_screen)
-                if candidate[3] <= score:
+                candidate_blockers = blocking_signature(candidate[0])
+                no_blocking_progress = (
+                    candidate[3] == score and candidate_blockers == accepted_blockers
+                    and (candidate[2] or blocking)
+                )
+                if candidate[3] <= score and not no_blocking_progress:
                     await self._trace_decision(run, "screen.edit_quality_gate", "candidate score <= accepted score", "accept_candidate", {
                         "previous_score": score, "candidate_score": candidate[3],
                     })
                     html = await save(edit.html, "rework" if edit.rewrite else f"review {round_no + 1}")
                     result, checks, blocking, score = candidate
+                    accepted_blockers = candidate_blockers
                 else:
-                    await self._trace_decision(run, "screen.edit_quality_gate", "candidate score > accepted score", "reject_candidate_keep_previous", {
+                    reason = "candidate made no progress on the same blocking findings" if no_blocking_progress else "candidate score > accepted score"
+                    await self._trace_decision(run, "screen.edit_quality_gate", reason, "reject_candidate_keep_previous", {
                         "previous_score": score, "candidate_score": candidate[3],
+                        "previous_blockers": accepted_blockers, "candidate_blockers": candidate_blockers,
                     })
-                    logger.info("Screen %s: rejected an edit that worsened the checks %s -> %s",
+                    logger.info("Screen %s: rejected an edit without acceptable QA progress (%s -> %s)",
                                 screen.id, score, candidate[3])
-                    notes.append("Your last change was rejected because it made the checks worse:\n" + candidate[1])
+                    if no_blocking_progress:
+                        notes.append(
+                            "Your previous edit did not change the blocking browser findings. Use the exact rendered "
+                            "element details below to fix the default-state leak; keep conditional content hidden "
+                            "until its approved trigger and preserve all required default-screen copy:\n" + candidate[1]
+                        )
+                    else:
+                        notes.append("Your last change was rejected because it made the checks worse:\n" + candidate[1])
             elif edit.ok and not blocking:
                 await self._trace_decision(run, "screen.edit_parse", "edit.ok and no blocking findings", "stop_review_loop", {
                     "round": round_no + 1, "failed_operations": edit.failed,
@@ -2231,6 +2265,25 @@ class HtmlDesigner:
                 max_attempts=2,
             )
             await self._usage(run, audit_usage, f"scope-review:{screen.id}")
+            invalid_targets = _invalid_navigation_targets(html, spec)
+            if invalid_targets:
+                navigation_issue = (
+                    "Prototype navigation contains unknown data-goto targets: "
+                    + ", ".join(repr(target) for target in invalid_targets)
+                    + ". Replace each with the exact canonical ID of its intended screen from this feature; "
+                    "if there is no matching screen, remove data-goto and keep the control non-navigating."
+                )
+                report.ready = False
+                report.issues = [navigation_issue, *report.issues][:5]
+                await self._trace_decision(
+                    run, "screen.navigation_gate", "all data-goto targets must match a feature screen ID",
+                    "repair_invalid_navigation", {"screen_id": screen.id, "invalid_targets": invalid_targets},
+                )
+            else:
+                await self._trace_decision(
+                    run, "screen.navigation_gate", "all data-goto targets must match a feature screen ID",
+                    "pass", {"screen_id": screen.id, "allowed_screen_ids": [item.id for item in spec.screens]},
+                )
             return report
 
         audit = await audit_scope()
@@ -2241,6 +2294,7 @@ class HtmlDesigner:
         # covering the form) need a targeted repair loop. Re-audit only the
         # candidate that was actually accepted and rendered; never report an
         # old screenshot as if it were the repaired screen.
+        repair_feedback = ""
         for repair_round in range(1, 4):
             if audit.ready:
                 await self._trace_decision(run, "screen.scope_repair_loop", "audit.ready", "stop_repairs", {
@@ -2260,13 +2314,15 @@ class HtmlDesigner:
                         "Fix every listed issue in the visible rendered result, including its actual default-state "
                         "behavior and geometry. Delete unsupported factual claims. Remove any control absent from "
                         "the approved default action list; error-recovery actions must not be visible or active "
-                        "in the initial loading view. For a duplicated input placeholder, preserve the approved "
-                        "native placeholder and remove only the overlay text element that repeats it; do not remove "
-                        "the placeholder to satisfy the visual repair. Preserve approved default content and do not "
-                        "add anything outside the approved screen specification.\n" + audit_notes
+                        "in the initial loading view. Preserve all required visible content from the approved screen, "
+                        "including exact values and examples, while changing only the layout or redundant presentation "
+                        "needed to resolve the review. Do not remove required copy to satisfy a visual review, and do "
+                        "not add anything outside the approved screen specification. For every data-goto navigation, "
+                        "use an exact screen ID from the feature's canonical screen list; never invent IDs from labels. "
+                        "Remove data-goto if the approved destination is not part of this feature.\n" + audit_notes + repair_feedback
                     ),
                     width=width,
-                    checks="- Scope/style audit failed:\n" + audit_notes,
+                    checks="- Scope/style audit failed:\n" + audit_notes + repair_feedback,
                     checklist=knowledge.ui_ux_design_rules() + "\n\n" + knowledge.review_checklist(),
                     html=html,
                     approved_screen=json.dumps(default_approved_screen, ensure_ascii=False),
@@ -2295,8 +2351,14 @@ class HtmlDesigner:
             candidate_html = await save(edit.html, f"scope/style candidate {repair_round}/3")
             candidate = await self._check(candidate_html, screen, width, design, session.project_id, approved_screen)
             if candidate[3] > score:
-                await self._trace_decision(run, "screen.scope_repair_quality_gate", "candidate score > accepted score", "reject_repair_keep_previous", {
+                repair_feedback = (
+                    "\nThe previous repair was rejected by the browser quality gate because it worsened the accepted "
+                    f"screen (score {candidate[3]} vs {score}). Correct these checks in the next repair while retaining "
+                    "all required content:\n" + candidate[1]
+                )
+                await self._trace_decision(run, "screen.scope_repair_quality_gate", "candidate score > accepted score", "reject_repair_keep_previous_and_feed_checks_back", {
                     "repair_round": repair_round, "previous_score": score, "candidate_score": candidate[3],
+                    "candidate_checks": candidate[1],
                 })
                 logger.warning(
                     "Scope/style repair %s/%s increased blocking lint score for screen %s; keeping last accepted render",
@@ -2304,8 +2366,23 @@ class HtmlDesigner:
                 )
                 continue
 
+            candidate_blockers = blocking_signature(candidate[0])
+            repair_made_no_progress = (
+                candidate[3] == score and candidate_blockers == accepted_blockers and (candidate[2] or blocking)
+            )
+            next_repair_feedback = ""
+            if repair_made_no_progress:
+                next_repair_feedback = (
+                    "\nThe prior repair did not change the blocking browser findings. The offending default-state "
+                    "element and its rendered bounds are included in the browser checks; update that specific "
+                    "region so it appears only after its approved trigger, while preserving the screen's required "
+                    "default content.\n" + candidate[1]
+                )
+
             html = await save(edit.html, f"scope/style repair {repair_round}/3")
             result, checks, blocking, score = candidate
+            accepted_blockers = candidate_blockers
+            repair_feedback = next_repair_feedback
             audit = await audit_scope()
             await self._trace_decision(run, "screen.scope_audit", "audit.ready after repair", "pass" if audit.ready else "continue_repairing", {
                 "repair_round": repair_round, "ready": audit.ready, "issues": audit.issues,

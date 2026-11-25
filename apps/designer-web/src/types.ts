@@ -92,6 +92,22 @@ export interface HulyProjectsResponse {
     default_project_id: string;
 }
 
+export interface HulyMember { name: string; email: string }
+export interface HulyMembersResponse { members: HulyMember[] }
+export interface HulyEpic { identifier: string; title: string }
+export interface HulyEpicsResponse { epics: HulyEpic[] }
+export interface HulyMetadataOption { id?: string; name?: string; title?: string; identifier?: string }
+export interface HulyProjectMetadata {
+    statuses: HulyMetadataOption[];
+    task_types: HulyMetadataOption[];
+    components: HulyMetadataOption[];
+    milestones: HulyMetadataOption[];
+    labels: HulyMetadataOption[];
+    default_status: string;
+}
+export interface HulyIssueMatch { identifier: string; title: string; url?: string }
+export interface HulyIssueSearchResponse { issues: HulyIssueMatch[] }
+
 export interface HulyIssueDraft {
     run_id: string;
     project_id: string;
@@ -100,6 +116,71 @@ export interface HulyIssueDraft {
     current_state: string;
     solution: string;
     acceptance_criteria: string;
+    priority: "urgent" | "high" | "medium" | "low" | "none";
+    assignee: string;
+    due_date: string;
+    epic_id: string;
+}
+
+export interface HulyTaskConfig {
+    assignee: string;
+    due_date: string;
+    priority: HulyProposalPriority;
+    status: string;
+    task_type: string;
+    labels: string[];
+    component: string;
+    milestone: string;
+    estimation_hours: number | null;
+    dependency_keys: string[];
+    related_issue_ids: string[];
+}
+
+export interface HulyBulkIssueDraft {
+    run_id: string;
+    project_id: string;
+    epic_id: string;
+    tasks: Array<HulyProposedTask & HulyTaskConfig & { clarification_notes: string[]; source_titles: string[] }>;
+}
+
+export type HulyProposalPriority = "urgent" | "high" | "medium" | "low" | "none";
+
+export interface HulyProposedTask {
+    key: string;
+    role: "FE" | "BE" | "QA" | "BA" | "Design" | "Other";
+    title: string;
+    outcome: string;
+    scope_in: string[];
+    scope_out: string[];
+    acceptance_criteria: string[];
+    priority: HulyProposalPriority;
+    priority_rationale: string;
+    dependency_keys: string[];
+    source_refs: string[];
+}
+
+export interface HulyTaskProposal {
+    summary: string;
+    tasks: HulyProposedTask[];
+    open_questions: {
+        question: string;
+        reason: string;
+        affected_task_keys: string[];
+        source_refs: string[];
+    }[];
+}
+
+export interface HulyTaskProposalResponse {
+    proposal: HulyTaskProposal;
+    proposal_mode?: "agent" | "fallback";
+    proposal_notice?: string;
+    sources: Record<string, string>;
+    source_meta: {
+        ba_available: boolean;
+        ba_artifact_id?: string | null;
+        ba_version?: number | null;
+        approved_screens: { id: string; name: string }[];
+    };
 }
 
 export interface HulyIssueResult {
@@ -107,6 +188,13 @@ export interface HulyIssueResult {
     url: string;
     attachments?: { filename: string; status: string }[];
     attachment_errors?: { filename: string; error: string }[];
+    parent_epic?: string;
+    parent_error?: string;
+}
+
+export interface HulyBulkIssueResult {
+    created: Array<{ key: string; identifier: string; url: string; dependencies_linked: number; relation_errors: string[] }>;
+    errors: Array<{ key: string; title: string; error: string }>;
 }
 
 export interface HulyPreviewScreen {

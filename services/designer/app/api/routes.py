@@ -4,6 +4,7 @@ import binascii
 import json
 import re
 import struct
+from datetime import date
 from string import Template
 import tempfile
 import unicodedata
@@ -24,6 +25,7 @@ from ..core.errors import AppError, not_found
 from ..core.llm import STRUCTURED_PARSER_VERSION
 from ..designsystem.service import design_context
 from ..huly import client as huly_client
+from ..huly.proposal import HulyTaskProposal, TaskPriority, TaskRole, fallback_proposal, proposal_prompt, validate_proposal_links
 from ..models import ExactAsset, Platform, ReviewCreate, RunCreate, RunView, SessionCreate, SessionView
 from ..render.assets import inline_assets
 from .access import DESIGNER_ROLE, current_user_id, current_username
@@ -48,6 +50,46 @@ class HulyIssueCreate(BaseModel):
     current_state: str = Field(min_length=1, max_length=8_000)
     solution: str = Field(min_length=1, max_length=12_000)
     acceptance_criteria: str = Field(min_length=1, max_length=12_000)
+    priority: str = Field(default="none", pattern=r"^(urgent|high|medium|low|none)$")
+    assignee: str = Field(default="", max_length=240)
+    due_date: str = Field(default="", pattern=r"^$|^\d{4}-\d{2}-\d{2}$")
+    epic_id: str = Field(default="", max_length=240)
+
+
+class HulyBulkTaskCreate(BaseModel):
+    key: str = Field(min_length=1, max_length=80)
+    role: TaskRole
+    title: str = Field(min_length=1, max_length=240)
+    outcome: str = Field(min_length=1, max_length=2_000)
+    scope_in: list[str] = Field(min_length=1, max_length=12)
+    scope_out: list[str] = Field(default_factory=list, max_length=12)
+    acceptance_criteria: list[str] = Field(min_length=1, max_length=16)
+    priority: TaskPriority
+    status: str = Field(default="", max_length=80)
+    task_type: str = Field(default="", max_length=80)
+    labels: list[str] = Field(default_factory=list, max_length=20)
+    component: str = Field(default="", max_length=160)
+    milestone: str = Field(default="", max_length=160)
+    estimation_hours: float | None = Field(default=None, ge=0, le=10000)
+    priority_rationale: str = Field(default="", max_length=800)
+    assignee: str = Field(min_length=1, max_length=240)
+    due_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    dependency_keys: list[str] = Field(default_factory=list, max_length=8)
+    related_issue_ids: list[str] = Field(default_factory=list, max_length=20)
+    source_refs: list[str] = Field(default_factory=list, max_length=16)
+    source_titles: list[str] = Field(default_factory=list, max_length=16)
+    clarification_notes: list[str] = Field(default_factory=list, max_length=12)
+
+
+class HulyBulkIssueCreate(BaseModel):
+    run_id: UUID
+    project_id: str = Field(min_length=1, max_length=160)
+    epic_id: str = Field(default="", max_length=240)
+    tasks: list[HulyBulkTaskCreate] = Field(min_length=1, max_length=8)
+
+
+class HulyProposalRequest(BaseModel):
+    run_id: UUID
 
 
 class AttachmentParseRequest(BaseModel):
@@ -136,6 +178,43 @@ async def list_huly_projects(request: Request) -> dict[str, Any]:
     settings = request.app.state.settings
     projects = await huly_client.list_projects(settings)
     return {"projects": projects, "default_project_id": settings.huly_project}
+
+
+@router.get("/huly/members")
+async def list_huly_members(request: Request) -> dict[str, Any]:
+    members = await huly_client.list_members(request.app.state.settings)
+    return {"members": members}
+
+
+@router.get("/huly/projects/{project_id}/epics")
+async def list_huly_epics(request: Request, project_id: str) -> dict[str, Any]:
+    settings = request.app.state.settings
+    projects = await huly_client.list_projects(settings)
+    project = next((item for item in projects if project_id in {item["id"], item["identifier"], item["huly_id"]}), None)
+    if project is None:
+        raise AppError("HULY_PROJECT_INVALID", "Huly project is unavailable", "Select a project from the current Huly workspace.", 422)
+    epics = await huly_client.list_epics(settings, project=project["identifier"])
+    return {"epics": epics}
+
+
+@router.get("/huly/projects/{project_id}/metadata")
+async def get_huly_project_metadata(request: Request, project_id: str) -> dict[str, Any]:
+    settings = request.app.state.settings
+    projects = await huly_client.list_projects(settings)
+    project = next((item for item in projects if project_id in {item["id"], item["identifier"], item["huly_id"]}), None)
+    if project is None:
+        raise AppError("HULY_PROJECT_INVALID", "Huly project is unavailable", "Select a project from the current Huly workspace.", 422)
+    return await huly_client.list_project_metadata(settings, project=project["identifier"])
+
+
+@router.get("/huly/projects/{project_id}/issues/search")
+async def search_huly_project_issues(request: Request, project_id: str, q: str = Query(min_length=2, max_length=160)) -> dict[str, Any]:
+    settings = request.app.state.settings
+    projects = await huly_client.list_projects(settings)
+    project = next((item for item in projects if project_id in {item["id"], item["identifier"], item["huly_id"]}), None)
+    if project is None:
+        raise AppError("HULY_PROJECT_INVALID", "Huly project is unavailable", "Select a project from the current Huly workspace.", 422)
+    return {"issues": await huly_client.search_issues(settings, project=project["identifier"], query=q)}
 
 
 def _read_ba_package(session: Any) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
@@ -474,6 +553,129 @@ async def get_huly_attachment_preview(request: Request, session_id: UUID, run_id
     }
 
 
+@router.post("/sessions/{session_id}/huly/proposals")
+async def propose_huly_tasks(request: Request, session_id: UUID, body: HulyProposalRequest) -> dict[str, Any]:
+    """Draft task breakdown from approved BA/design sources; this endpoint never writes to Huly."""
+    store = request.app.state.store
+    session = await store.get_session(session_id)
+    if session is None:
+        raise not_found("Session")
+    run = await store.get_run(body.run_id)
+    if run is None or run.session_id != session_id:
+        raise not_found("Run")
+    if run.stage != "finished" or run.status != "completed":
+        raise AppError("DESIGN_NOT_APPROVED", "Design is not approved", "Approve the final design before generating task proposals.", 409)
+    screens = await store.list_screens(session_id, with_html=False)
+    if not screens:
+        raise AppError("DESIGN_SCREENS_MISSING", "No screens to analyze", "The approved session has no saved screens.", 409)
+
+    try:
+        package, artifact = await asyncio.to_thread(_read_ba_package, session)
+    except Exception:  # noqa: BLE001 - a proposal can still use the approved design without BA storage
+        package, artifact = None, None
+    fallback_draft = _task_draft_from_sources(session, run, screens, package, artifact)
+
+    payload = package.get("payload", {}) if isinstance(package, dict) else {}
+    payload = payload if isinstance(payload, dict) else {}
+    artifacts = payload.get("artifacts", {}) if isinstance(payload.get("artifacts"), dict) else {}
+    selected_ba = {
+        "feature_title": payload.get("feature_title"),
+        "feature_description": payload.get("feature_description"),
+        "feature_definition": artifacts.get("feature_definition"),
+        "business_rules": artifacts.get("business_rules", [])[:200] if isinstance(artifacts.get("business_rules"), list) else [],
+        "use_cases": artifacts.get("use_cases", [])[:200] if isinstance(artifacts.get("use_cases"), list) else [],
+        "bpmn_reference": artifacts.get("bpmn_reference", {}),
+        "ui_touchpoints": artifacts.get("ui_touchpoints", [])[:200] if isinstance(artifacts.get("ui_touchpoints"), list) else [],
+        "available": package is not None,
+    }
+    ba_context = json.dumps(selected_ba, ensure_ascii=False, default=str)
+
+    source_ids: set[str] = set()
+    source_catalog: dict[str, str] = {}
+    feature = artifacts.get("feature_definition", {}) if isinstance(artifacts.get("feature_definition"), dict) else {}
+    feature_ref = str(feature.get("id") or (package or {}).get("feature_id") or "").strip()
+    if package is not None:
+        feature_ref = feature_ref or "BA:FEATURE"
+        source_ids.add(feature_ref)
+        source_catalog[feature_ref] = str(payload.get("feature_title") or session.title)
+    for kind, entries, label_key in (
+        ("BR", selected_ba["business_rules"], "statement"),
+        ("US", selected_ba["use_cases"], "title"),
+    ):
+        if isinstance(entries, list):
+            for index, entry in enumerate(entries, start=1):
+                if not isinstance(entry, dict):
+                    continue
+                ref = str(entry.get("id") or f"{kind}:{index}")
+                source_ids.add(ref)
+                source_catalog[ref] = str(entry.get(label_key) or entry.get("name") or f"{kind} item {index}")[:240]
+    workflow = selected_ba["bpmn_reference"] if isinstance(selected_ba["bpmn_reference"], dict) else {}
+    for index, item in enumerate(workflow.get("exceptions", []) if isinstance(workflow.get("exceptions"), list) else [], start=1):
+        if not isinstance(item, dict):
+            continue
+        ref = str(item.get("id") or f"WF:EX:{index}")
+        source_ids.add(ref)
+        source_catalog[ref] = str(item.get("condition") or item.get("name") or f"Workflow exception {index}")[:240]
+
+    run_spec = run.specification if isinstance(run.specification, dict) else {}
+    spec_screens = run_spec.get("screens", []) if isinstance(run_spec.get("screens"), list) else []
+    screen_by_id = {str(item.get("id")): item for item in spec_screens if isinstance(item, dict)}
+    design_screens = []
+    for screen in screens:
+        screen_id = str(screen.id)
+        screen_spec = screen_by_id.get(screen_id, {})
+        ref = f"SCREEN:{screen_id}"
+        source_ids.add(ref)
+        source_catalog[ref] = screen.name
+        design_screens.append({
+            "source_ref": ref,
+            "name": screen.name,
+            "platform": str(screen.platform),
+            "width": screen.width,
+            "purpose": screen_spec.get("purpose"),
+            "sections": screen_spec.get("sections", []),
+            "states": screen_spec.get("states", []),
+            "navigation": screen_spec.get("navigation", []),
+            "must_show": screen_spec.get("must_show", []),
+            "source_ui_ids": screen_spec.get("source_ui_ids", []),
+        })
+    design_context_json = json.dumps({
+        "style_direction": run_spec.get("style_direction"),
+        "screens": design_screens,
+        "ba_package_available": package is not None,
+        "note": "Screen content is approved. Treat it as design evidence, not a source of unstated backend rules.",
+    }, ensure_ascii=False, default=str)
+    prompt = proposal_prompt(
+        title=session.title,
+        draft=fallback_draft,
+        ba_context=ba_context,
+        design_context=design_context_json,
+        source_ids=sorted(source_ids),
+    )
+    proposal_mode = "agent"
+    proposal_notice = ""
+    try:
+        proposal = await request.app.state.llm.structured(prompt=prompt, schema=HulyTaskProposal)
+        validate_proposal_links(proposal, source_ids)
+    except (ValueError, AppError):
+        proposal = fallback_proposal(title=session.title, draft=fallback_draft, screens=screens, source_ids=source_ids)
+        proposal_mode = "fallback"
+        proposal_notice = "AI chưa phân tích được lúc này. Đây là bản nháp một task lấy từ thiết kế đã duyệt; hãy rà lại trước khi tạo."
+
+    return {
+        "proposal": proposal.model_dump(),
+        "proposal_mode": proposal_mode,
+        "proposal_notice": proposal_notice,
+        "sources": source_catalog,
+        "source_meta": {
+            "ba_available": package is not None,
+            "ba_artifact_id": artifact.get("id") if artifact else None,
+            "ba_version": artifact.get("version") if artifact else None,
+            "approved_screens": [{"id": str(screen.id), "name": screen.name} for screen in screens],
+        },
+    }
+
+
 @router.post("/sessions/{session_id}/huly/issues", status_code=status.HTTP_201_CREATED)
 async def create_huly_issue(request: Request, session_id: UUID, body: HulyIssueCreate) -> dict[str, Any]:
     store = request.app.state.store
@@ -507,6 +709,10 @@ async def create_huly_issue(request: Request, session_id: UUID, body: HulyIssueC
         ]
     )
     huly_project = next(project for project in projects if body.project_id in {project["id"], project["identifier"], project["huly_id"]})
+    if body.epic_id:
+        epics = await huly_client.list_epics(request.app.state.settings, project=huly_project["identifier"])
+        if not any(epic["identifier"] == body.epic_id for epic in epics):
+            raise AppError("HULY_EPIC_INVALID", "Huly Epic is unavailable", "Select an Epic from the selected Huly project.", 422)
     design = await design_context(store, session)
     upload_root = Path("/tmp/huly-uploads")
     upload_root.mkdir(parents=True, exist_ok=True)
@@ -543,9 +749,177 @@ async def create_huly_issue(request: Request, session_id: UUID, body: HulyIssueC
             project=huly_project["identifier"],
             title=body.title.strip(),
             description=description,
+            priority=body.priority,
+            assignee=body.assignee.strip(),
+            due_date=body.due_date,
+            epic_id=body.epic_id,
             attachments=attachments,
         )
     return result
+
+
+@router.post("/sessions/{session_id}/huly/issues/batch", status_code=status.HTTP_201_CREATED)
+async def create_huly_issues_batch(request: Request, session_id: UUID, body: HulyBulkIssueCreate) -> dict[str, Any]:
+    """Create the selected proposal tasks, then connect their Epic/dependency relations."""
+    store = request.app.state.store
+    session = await store.get_session(session_id)
+    if session is None:
+        raise not_found("Session")
+    run = await store.get_run(body.run_id)
+    if run is None or run.session_id != session_id or run.stage != "finished" or run.status != "completed":
+        raise AppError("DESIGN_NOT_APPROVED", "Design is not approved", "Approve the final design before creating Huly issues.", 409)
+    screens = await store.list_screens(session_id, with_html=True)
+    if not screens:
+        raise AppError("DESIGN_SCREENS_MISSING", "No screens to hand off", "The approved session has no saved screens.", 409)
+
+    keys = [task.key for task in body.tasks]
+    if len(set(keys)) != len(keys):
+        raise AppError("HULY_TASK_KEYS_INVALID", "Invalid task selection", "Task keys must be unique.", 422)
+    selected = set(keys)
+    graph = {task.key: task.dependency_keys for task in body.tasks}
+    if any(dependency not in selected or dependency == key for key, deps in graph.items() for dependency in deps):
+        raise AppError("HULY_DEPENDENCY_INVALID", "Invalid task dependency", "Every dependency must point to another selected task.", 422)
+    visiting: set[str] = set()
+    visited: set[str] = set()
+    def visit(key: str) -> None:
+        if key in visiting:
+            raise AppError("HULY_DEPENDENCY_CYCLE", "Task dependency cycle", "Remove circular dependencies before creating tasks.", 422)
+        if key in visited:
+            return
+        visiting.add(key)
+        for dependency in graph[key]:
+            visit(dependency)
+        visiting.remove(key)
+        visited.add(key)
+    for key in keys:
+        visit(key)
+
+    for task in body.tasks:
+        try:
+            date.fromisoformat(task.due_date)
+        except ValueError as error:
+            raise AppError("HULY_DEADLINE_INVALID", "Invalid deadline", f"Task {task.title} has an invalid deadline.", 422) from error
+
+    settings = request.app.state.settings
+    projects = await huly_client.list_projects(settings)
+    huly_project = next((project for project in projects if body.project_id in {project["id"], project["identifier"], project["huly_id"]}), None)
+    if huly_project is None:
+        raise AppError("HULY_PROJECT_INVALID", "Huly project is unavailable", "Select a project from the current Huly workspace.", 422)
+    metadata = await huly_client.list_project_metadata(settings, project=huly_project["identifier"])
+    def option_names(key: str) -> set[str]:
+        return {str(option.get("name") or option.get("title") or option.get("identifier") or option.get("id") or "").casefold() for option in metadata.get(key, []) if isinstance(option, dict)}
+    statuses = option_names("statuses")
+    task_types = option_names("task_types")
+    components = option_names("components")
+    milestones = option_names("milestones")
+    labels = option_names("labels")
+    for task in body.tasks:
+        if task.status and task.status.casefold() not in statuses:
+            raise AppError("HULY_STATUS_INVALID", "Huly status is unavailable", f"Choose a status configured in project {huly_project['identifier']}.", 422)
+        if task.task_type and task.task_type.casefold() not in task_types:
+            raise AppError("HULY_TYPE_INVALID", "Huly task type is unavailable", f"Choose a task type configured in project {huly_project['identifier']}.", 422)
+        if task.component and task.component.casefold() not in components:
+            raise AppError("HULY_COMPONENT_INVALID", "Huly component is unavailable", f"Choose a component configured in project {huly_project['identifier']}.", 422)
+        if task.milestone and task.milestone.casefold() not in milestones:
+            raise AppError("HULY_MILESTONE_INVALID", "Huly milestone is unavailable", f"Choose a milestone configured in project {huly_project['identifier']}.", 422)
+        if any(label.casefold() not in labels for label in task.labels):
+            raise AppError("HULY_LABEL_INVALID", "Huly label is unavailable", "Choose labels already configured in this Huly workspace.", 422)
+    if body.epic_id:
+        epics = await huly_client.list_epics(settings, project=huly_project["identifier"])
+        if not any(epic["identifier"] == body.epic_id for epic in epics):
+            raise AppError("HULY_EPIC_INVALID", "Huly Epic is unavailable", "Select an Epic from the selected Huly project.", 422)
+    members = {member["name"].casefold() for member in await huly_client.list_members(settings)}
+    invalid_assignees = [task.title for task in body.tasks if task.assignee.casefold() not in members]
+    if invalid_assignees:
+        raise AppError("HULY_ASSIGNEE_INVALID", "Huly assignee is unavailable", "Choose an active member for every selected task.", 422)
+
+    design = await design_context(store, session)
+    artifact_preview = await get_huly_attachment_preview(request, session_id, run.id)
+    upload_root = Path("/tmp/huly-uploads")
+    upload_root.mkdir(parents=True, exist_ok=True)
+    created: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    created_by_key: dict[str, dict[str, Any]] = {}
+    with tempfile.TemporaryDirectory(prefix="approved-design-batch-", dir=upload_root) as temp_dir:
+        output_dir = Path(temp_dir)
+        attachments: list[dict[str, str]] = []
+        for index, screen in enumerate(screens, start=1):
+            rendered = await request.app.state.renderer.render(
+                await inline_assets(screen.html or "", session.project_id),
+                width=screen.width, screenshot="png", lint=False,
+                theme_css=design.theme_css, fonts=design.fonts,
+            )
+            if not rendered.image:
+                raise AppError("HULY_EXPORT_FAILED", "Could not export screen PNG", f"PNG export failed for {screen.name}.", 502)
+            filename = f"{index:02d}-{screen.id}.png"
+            file_path = output_dir / filename
+            file_path.write_bytes(rendered.image)
+            attachments.append({"filename": filename, "content_type": "image/png", "file_path": str(file_path), "description": f"Approved screen {index}: {screen.name}"})
+        spec_path = output_dir / "ui-spec.md"
+        spec_path.write_text(artifact_preview["spec_markdown"], encoding="utf-8")
+        attachments.append({"filename": spec_path.name, "content_type": "text/markdown", "file_path": str(spec_path), "description": "Approved UI specification"})
+        if artifact_preview["design_tokens"] is not None:
+            tokens_path = output_dir / "design-tokens.json"
+            tokens_path.write_text(json.dumps(artifact_preview["design_tokens"], ensure_ascii=False, indent=2), encoding="utf-8")
+            attachments.append({"filename": tokens_path.name, "content_type": "application/json", "file_path": str(tokens_path), "description": "Approved design tokens"})
+
+        for task in body.tasks:
+            dependency_titles = [next(item.title for item in body.tasks if item.key == key) for key in task.dependency_keys]
+            clarification_text = "\n".join(f"- {note}" for note in task.clarification_notes) or "- No unresolved BA/PO questions."
+            source_lines = [f"- {title}" for title in task.source_titles] or [f"- {ref}" for ref in task.source_refs]
+            description = "\n\n".join([
+                "## Nguồn\n" + "\n".join(source_lines),
+                f"## Mục tiêu\n{task.outcome}",
+                "## Hiện trạng\nThiết kế đã được duyệt; phần triển khai của task này chưa được xác nhận hoàn tất.",
+                "## Giải pháp và phạm vi\n### Bao gồm\n" + "\n".join(f"- {item}" for item in task.scope_in) + "\n\n### Ngoài phạm vi\n" + ("\n".join(f"- {item}" for item in task.scope_out) or "- Chưa nêu."),
+                f"## Cần chốt với BA/PO\n{clarification_text}",
+                "## Tiêu chí nghiệm thu\n| # | Tình huống kiểm thử | Hoàn tất |\n|---:|---|:---:|\n" + "\n".join(f"| {index} | {item.replace('|', '／')} | [ ] |" for index, item in enumerate(task.acceptance_criteria, start=1)),
+                f"## Lý do ưu tiên\n{task.priority_rationale or 'Được chọn khi rà soát task.'}",
+                "## Task phụ thuộc\n" + ("\n".join(f"- {item}" for item in dependency_titles) or "- Không có."),
+                "## Issue liên quan\n" + ("\n".join(f"- {identifier}" for identifier in task.related_issue_ids) or "- Không có."),
+                "## Màn hình đã duyệt\n" + "\n".join(f"- {screen.name} ({screen.platform})" for screen in screens),
+                f"Source: Agent Designer · Session `{session_id}` · Run `{run.id}`",
+            ])
+            try:
+                result = await huly_client.create_issue(
+                    settings, project=huly_project["identifier"], title=task.title,
+                    description=description, priority=task.priority, assignee=task.assignee,
+                    status=task.status or metadata.get("default_status", ""), due_date=task.due_date,
+                    epic_id=body.epic_id, task_type=task.task_type or next((str(item.get("name") or item.get("title") or "") for item in metadata.get("task_types", []) if isinstance(item, dict)), ""),
+                    labels=task.labels, component=task.component, milestone=task.milestone,
+                    estimation_hours=task.estimation_hours, attachments=attachments,
+                )
+                entry = {"key": task.key, "identifier": result["identifier"], "url": result["url"], "dependencies_linked": 0, "related_linked": 0, "relation_errors": []}
+                if result.get("parent_error"):
+                    entry["relation_errors"].append(f"Epic: {result['parent_error']}")
+                if result.get("attachment_errors"):
+                    entry["relation_errors"].extend(f"Attachment {item['filename']}: {item['error']}" for item in result["attachment_errors"])
+                created_by_key[task.key] = entry
+                created.append(entry)
+            except AppError as error:
+                errors.append({"key": task.key, "title": task.title, "error": error.detail[:500]})
+
+        for task in body.tasks:
+            entry = created_by_key.get(task.key)
+            if entry is None:
+                continue
+            for dependency_key in task.dependency_keys:
+                blocker = created_by_key.get(dependency_key)
+                if blocker is None:
+                    entry["relation_errors"].append(f"Dependency {dependency_key} was not created.")
+                    continue
+                try:
+                    await huly_client.add_dependency(settings, issue_id=entry["identifier"], blocker_issue_id=blocker["identifier"])
+                    entry["dependencies_linked"] += 1
+                except AppError as error:
+                    entry["relation_errors"].append(f"Dependency {dependency_key}: {error.detail[:240]}")
+            for related_id in task.related_issue_ids:
+                try:
+                    await huly_client.add_related_issue(settings, issue_id=entry["identifier"], related_issue_id=related_id)
+                    entry["related_linked"] += 1
+                except AppError as error:
+                    entry["relation_errors"].append(f"Related {related_id}: {error.detail[:240]}")
+    return {"created": created, "errors": errors}
 
 
 @router.post("/attachments/parse", response_model=AttachmentParseResult)

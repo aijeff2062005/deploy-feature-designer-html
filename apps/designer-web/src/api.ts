@@ -197,8 +197,22 @@ export const api = {
     eventUrl: (runId: string) => `${API_BASE}/runs/${runId}/events`,
     eventHistory: (runId: string) => request<import("./types").WorkflowEvent[]>(`/runs/${runId}/event-history`),
     hulyProjects: () => request<import("./types").HulyProjectsResponse>("/huly/projects"),
+    hulyMembers: () => request<import("./types").HulyMembersResponse>("/huly/members"),
+    hulyEpics: (projectId: string) => request<import("./types").HulyEpicsResponse>(`/huly/projects/${encodeURIComponent(projectId)}/epics`),
+    hulyProjectMetadata: (projectId: string) => request<import("./types").HulyProjectMetadata>(`/huly/projects/${encodeURIComponent(projectId)}/metadata`),
+    searchHulyIssues: (projectId: string, query: string) => request<import("./types").HulyIssueSearchResponse>(`/huly/projects/${encodeURIComponent(projectId)}/issues/search?q=${encodeURIComponent(query)}`),
+    proposeHulyTasks: (sessionId: string, runId: string) =>
+        request<import("./types").HulyTaskProposalResponse>(`/sessions/${sessionId}/huly/proposals`, {
+            method: "POST",
+            body: JSON.stringify({ run_id: runId }),
+        }),
     createHulyIssue: (sessionId: string, draft: import("./types").HulyIssueDraft) =>
         request<import("./types").HulyIssueResult>(`/sessions/${sessionId}/huly/issues`, {
+            method: "POST",
+            body: JSON.stringify(draft),
+        }),
+    createHulyIssues: (sessionId: string, draft: import("./types").HulyBulkIssueDraft) =>
+        request<import("./types").HulyBulkIssueResult>(`/sessions/${sessionId}/huly/issues/batch`, {
             method: "POST",
             body: JSON.stringify(draft),
         }),

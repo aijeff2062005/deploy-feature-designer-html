@@ -96,8 +96,25 @@ async ({ mobile, axe, strictTouchTargets = false, strictVisualQuality = false, r
   // treats the reward label "+100 Xu" as the unavailable-balance state "0 Xu".
   const prematureConditionalCopy = forbiddenTexts.filter((value) => value && containsCopyPhrase(visibleCopy, value));
   if (prematureConditionalCopy.length) {
+    const conditionalNodes = prematureConditionalCopy.flatMap((phrase) => {
+      const matches = all.filter((el) => {
+        const nodeCopy = [
+          el.innerText,
+          el.getAttribute("placeholder"),
+          el.getAttribute("aria-label"),
+          el.matches("select") ? el.selectedOptions?.[0]?.textContent : "",
+        ].filter(Boolean).join(" ");
+        return containsCopyPhrase(nodeCopy, phrase);
+      });
+      // Report the smallest matching visible region so the repair can target
+      // the leaking state without deleting an entire card or screen section.
+      const leaves = matches.filter((el) => !matches.some((other) => other !== el && el.contains(other)));
+      return (leaves.length ? leaves : matches).map((el) => ({ ...short(el), conditionalText: phrase }));
+    });
+    const uniqueConditionalNodes = [...new Map(conditionalNodes.map((node) => [node.id || node.html, node])).values()];
     findings.push({
-      severity: "error", rule: "conditional-content-on-first-paint", count: prematureConditionalCopy.length, elements: [],
+      severity: "error", rule: "conditional-content-on-first-paint", count: prematureConditionalCopy.length,
+      elements: uniqueConditionalNodes.slice(0, MAX),
       message: `Conditional-state UI is visible before its trigger: ${prematureConditionalCopy.join("; ")}. Keep conditional regions closed/hidden in the initial preview.`,
     });
   }
@@ -179,13 +196,58 @@ async ({ mobile, axe, strictTouchTargets = false, strictVisualQuality = false, r
   add("warning", "empty-region", "Large empty box: fill it with content or remove it.", empty);
 
   if (strictVisualQuality) {
-    const canvasArea = Math.max(1, window.innerWidth * Math.min(window.innerHeight, document.documentElement.scrollHeight));
+    const canvasArea = Math.max(1, window.innerWidth * document.documentElement.scrollHeight);
+    const documentBounds = (el) => {
+      const rect = el.getBoundingClientRect();
+      const box = { left: Math.max(0, rect.left), right: Math.min(window.innerWidth, rect.right),
+        top: Math.max(0, rect.top + window.scrollY), bottom: Math.min(document.documentElement.scrollHeight, rect.bottom + window.scrollY) };
+      for (let parent = el.parentElement; parent; parent = parent.parentElement) {
+        const style = getComputedStyle(parent);
+        const clipX = /(hidden|clip|auto|scroll)/.test(style.overflowX);
+        const clipY = /(hidden|clip|auto|scroll)/.test(style.overflowY);
+        if (!clipX && !clipY) continue;
+        const clip = parent.getBoundingClientRect();
+        if (clipX) { box.left = Math.max(box.left, clip.left); box.right = Math.min(box.right, clip.right); }
+        if (clipY) { box.top = Math.max(box.top, clip.top + window.scrollY); box.bottom = Math.min(box.bottom, clip.bottom + window.scrollY); }
+      }
+      return box.right > box.left && box.bottom > box.top ? box : null;
+    };
+    const areaOfUnion = (rects) => {
+      const edges = [...new Set(rects.flatMap((rect) => [rect.left, rect.right]))].sort((a, b) => a - b);
+      let area = 0;
+      for (let i = 1; i < edges.length; i++) {
+        const left = edges[i - 1], right = edges[i];
+        if (right <= left) continue;
+        const spans = rects.filter((rect) => rect.left < right && rect.right > left)
+          .map((rect) => [rect.top, rect.bottom]).sort((a, b) => a[0] - b[0]);
+        let height = 0, start = null, end = null;
+        for (const [top, bottom] of spans) {
+          if (start === null) { start = top; end = bottom; }
+          else if (top <= end) end = Math.max(end, bottom);
+          else { height += end - start; start = top; end = bottom; }
+        }
+        if (start !== null) height += end - start;
+        area += (right - left) * height;
+      }
+      return area;
+    };
     const backgroundArt = all.filter((el) => {
       if (!el.hasAttribute("data-preview-background")) return false;
-      const rect = visibleBounds(el);
-      if (!rect || (rect.right - rect.left) * (rect.bottom - rect.top) < canvasArea * 0.18) return false;
-      const style = getComputedStyle(el);
-      return style.backgroundImage !== "none" || el.matches("svg,img,canvas") || Boolean(el.querySelector("svg,img,canvas"));
+      const layerBounds = documentBounds(el);
+      if (!layerBounds) return false;
+      const nodes = [el, ...el.querySelectorAll("*")];
+      const artBounds = nodes.flatMap((node) => {
+        const bounds = documentBounds(node);
+        if (!bounds) return [];
+        const style = getComputedStyle(node);
+        const hasCssArt = style.backgroundImage !== "none";
+        const hasMediaArt = node.matches("svg,img,canvas") || Boolean(node.querySelector("svg,img,canvas"));
+        if (!hasCssArt && !hasMediaArt) return [];
+        return [{ left: Math.max(layerBounds.left, bounds.left), right: Math.min(layerBounds.right, bounds.right),
+          top: Math.max(layerBounds.top, bounds.top), bottom: Math.min(layerBounds.bottom, bounds.bottom) }]
+          .filter((rect) => rect.right > rect.left && rect.bottom > rect.top);
+      });
+      return areaOfUnion(artBounds) >= canvasArea * 0.18;
     });
     add("error", "background-treatment",
       "The screen is missing a substantial designed background layer. Add a palette-derived gradient/texture or inline SVG inside a dedicated data-preview-background layer covering at least 18% of the canvas, behind readable content.",
@@ -231,7 +293,19 @@ async ({ mobile, axe, strictTouchTargets = false, strictVisualQuality = false, r
     const style = getComputedStyle(el);
     if (!(style.position === "fixed" || style.position === "sticky")) return false;
     const rect = el.getBoundingClientRect();
-    return rect.height >= 32 && rect.bottom >= window.innerHeight - 4 && rect.top < window.innerHeight;
+    if (!(rect.height >= 32 && rect.bottom >= window.innerHeight - 4 && rect.top < window.innerHeight)) return false;
+
+    // Full-screen visual layers (often fixed and viewport-sized) are not action
+    // bars. Only inspect a semantic footer or a compact pinned region that
+    // contains an actual interactive control. Ignore hidden/decorative layers
+    // anywhere in the candidate's ancestor chain.
+    for (let node = el; node; node = node.parentElement) {
+      const nodeStyle = getComputedStyle(node);
+      if (node.getAttribute("aria-hidden") === "true" || nodeStyle.pointerEvents === "none") return false;
+    }
+    const semanticFooter = el.matches("footer,[role=contentinfo]");
+    const hasAction = isInteractive(el) || [...el.querySelectorAll("a,button,input:not([type=hidden]),select,textarea,[role=button],[role=link],[role=radio],[role=checkbox],[role=switch],[role=tab]")].some(isInteractive);
+    return semanticFooter || (hasAction && rect.height < window.innerHeight * 0.5);
   });
   const footerOverlaps = new Set();
   for (const footer of bottomPinned) {
