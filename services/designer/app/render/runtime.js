@@ -96,6 +96,9 @@
     } else if (data.type === "designer:select") {
       selecting = !!data.on;
       if (!selecting) outline(hovered, false);
+    } else if (data.type === "designer:diff") {
+      if (data.show) document.documentElement.setAttribute("data-show-diff", "1");
+      else document.documentElement.removeAttribute("data-show-diff");
     }
   });
 

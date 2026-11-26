@@ -5,10 +5,12 @@ import {
     ChevronDown,
     Code2,
     Columns2,
+    Crosshair,
     Download,
     FileArchive,
     Files,
     FlaskConical,
+    GitCompareArrows,
     History,
     Image,
     Layers,
@@ -18,6 +20,7 @@ import {
     Moon,
     MousePointerClick,
     Plus,
+    RotateCcw,
     Rows3,
     Save,
     Search,
@@ -41,6 +44,17 @@ const PLATFORMS: Record<string, { label: string; icon: typeof Monitor }> = {
 };
 const POLL_MS = 3000;
 const SCREEN_EDIT_MARKER = /^\[\[DESIGNER_SCREEN_EDIT:([^\]]+)\]\]\s*/;
+const ELEMENT_CONTEXT_HEADER = "[Phần tử được chọn để chỉnh sửa]";
+const DIFF_SKIP_TAGS = new Set(["SCRIPT", "STYLE", "TEMPLATE", "HEAD", "META", "LINK", "TITLE", "NOSCRIPT"]);
+const DIFF_ATOMIC_TAGS = new Set([
+    "BUTTON", "A", "H1", "H2", "H3", "H4", "H5", "H6",
+    "P", "SPAN", "LABEL", "INPUT", "SELECT", "TEXTAREA",
+    "LI", "TD", "TH", "IMG", "SVG",
+]);
+const DIFF_STYLE_ID = "designer-diff-overlay-style";
+const COMPARE_GAP_PX = 28;
+const COMPARE_PADDING_PX = 40;
+const DIFF_KEY_ATTRS = ["placeholder", "value", "src", "href", "type", "data-lucide", "aria-label", "disabled"] as const;
 
 type FigLayout = "rows" | "pages";
 const LAYOUT_KEY = "designer.figLayout";
@@ -477,6 +491,377 @@ function MultiView({ screens, selectedId, onSelect, layout = "flow" }: { screens
     );
 }
 
+type SelectedElementChip = {
+    key: string;
+    screenId: string;
+    screenName: string;
+    id: string;
+    tag: string;
+    text: string;
+    html: string;
+};
+
+function parseEditPrompt(rawPrompt: string): { text: string; elements: string[] } {
+    const body = rawPrompt.replace(SCREEN_EDIT_MARKER, "").trim();
+    if (!body.startsWith(ELEMENT_CONTEXT_HEADER)) {
+        return { text: body, elements: [] };
+    }
+    const lines = body.split("\n");
+    const elements: string[] = [];
+    const textLines: string[] = [];
+    let inElements = true;
+    for (let i = 1; i < lines.length; i++) {
+        const line = lines[i];
+        if (inElements && line.startsWith("- ")) {
+            const match = line.match(/^- <([^>]+)>\s+"([^"]*)"/);
+            if (match) {
+                const label = match[2].trim() || match[1];
+                elements.push(label);
+            } else {
+                elements.push(line.slice(2, 50));
+            }
+        } else if (inElements && !line.trim()) {
+            inElements = false;
+        } else {
+            inElements = false;
+            textLines.push(line);
+        }
+    }
+    return { text: textLines.join("\n").trim() || body, elements };
+}
+
+function ownText(el: Element): string {
+    let out = "";
+    for (const node of el.childNodes) {
+        if (node.nodeType === Node.TEXT_NODE) out += node.textContent || "";
+    }
+    return out.replace(/\s+/g, " ").trim();
+}
+
+function elSignature(el: Element): string {
+    const classes = Array.from(el.classList).sort().join(" ");
+    const style = (el.getAttribute("style") || "").replace(/\s+/g, " ").trim();
+    const attrs = DIFF_KEY_ATTRS.map((a) => `${a}=${el.getAttribute(a) ?? ""}`).join("|");
+    return `${el.tagName}|${classes}|${style}|${attrs}|${ownText(el)}`;
+}
+
+function subtreeSignature(el: Element): string {
+    return el.outerHTML.replace(/\sdata-d="[^"]*"/g, "").replace(/\s+/g, " ").trim();
+}
+
+function visibleChildren(el: Element): Element[] {
+    return Array.from(el.children).filter((child) => !DIFF_SKIP_TAGS.has(child.tagName));
+}
+
+function matchScore(oldEl: Element, newEl: Element, oldIdx: number, newIdx: number): number {
+    let score = 0;
+    const oldId = oldEl.getAttribute("id");
+    const newId = newEl.getAttribute("id");
+    if (oldId && newId && oldId === newId) score += 100;
+    const oldRole = oldEl.getAttribute("data-design-role");
+    const newRole = newEl.getAttribute("data-design-role");
+    if (oldRole && newRole && oldRole === newRole) score += 60;
+    const oldClasses = new Set(oldEl.classList);
+    for (const c of newEl.classList) {
+        if (oldClasses.has(c)) score += 6;
+    }
+    if (ownText(oldEl) && ownText(oldEl) === ownText(newEl)) score += 20;
+    score -= Math.abs(oldIdx - newIdx) * 0.5;
+    return score;
+}
+
+function diffNodes(oldEl: Element, newEl: Element, marked: Set<Element>): void {
+    if (subtreeSignature(oldEl) === subtreeSignature(newEl)) return;
+    const oldKids = visibleChildren(oldEl);
+    const newKids = visibleChildren(newEl);
+    const selfChanged = elSignature(oldEl) !== elSignature(newEl);
+
+    if (newEl.tagName !== "BODY" && (newKids.length === 0 || (selfChanged && DIFF_ATOMIC_TAGS.has(newEl.tagName)))) {
+        newEl.setAttribute("data-diff-status", "modified");
+        newEl.setAttribute("data-diff-label", "Đã sửa");
+        marked.add(newEl);
+        return;
+    }
+
+    const usedOld = new Set<number>();
+    const matchedNew = new Map<number, number>();
+    const oldSigs = oldKids.map(subtreeSignature);
+
+    // Pass 1: exact subtree matches in order
+    newKids.forEach((nk, ni) => {
+        const sig = subtreeSignature(nk);
+        const oi = oldSigs.findIndex((s, idx) => !usedOld.has(idx) && s === sig);
+        if (oi !== -1) {
+            usedOld.add(oi);
+            matchedNew.set(ni, oi);
+        }
+    });
+
+    // Pass 2: fuzzy same-tag pairing
+    newKids.forEach((nk, ni) => {
+        if (matchedNew.has(ni)) return;
+        let bestOi = -1;
+        let bestScore = -Infinity;
+        oldKids.forEach((ok, oi) => {
+            if (usedOld.has(oi) || ok.tagName !== nk.tagName) return;
+            const s = matchScore(ok, nk, oi, ni);
+            if (s > bestScore) {
+                bestScore = s;
+                bestOi = oi;
+            }
+        });
+        if (bestOi !== -1) {
+            usedOld.add(bestOi);
+            matchedNew.set(ni, bestOi);
+            diffNodes(oldKids[bestOi], nk, marked);
+        } else {
+            nk.setAttribute("data-diff-status", "added");
+            nk.setAttribute("data-diff-label", "Mới");
+            marked.add(nk);
+        }
+    });
+
+    if (selfChanged && newEl.tagName !== "BODY") {
+        let hasMarkedDescendant = false;
+        for (const m of marked) {
+            if (newEl.contains(m)) {
+                hasMarkedDescendant = true;
+                break;
+            }
+        }
+        if (!hasMarkedDescendant) {
+            newEl.setAttribute("data-diff-status", "modified");
+            newEl.setAttribute("data-diff-label", "Đã sửa");
+            marked.add(newEl);
+        }
+    }
+}
+
+function annotateDiffHtml(oldHtml: string, newHtml: string): { html: string; count: number } {
+    if (!oldHtml || !newHtml) return { html: newHtml, count: 0 };
+    const parser = new DOMParser();
+    const oldDoc = parser.parseFromString(oldHtml, "text/html");
+    const newDoc = parser.parseFromString(newHtml, "text/html");
+    const marked = new Set<Element>();
+
+    if (oldDoc.body && newDoc.body) {
+        diffNodes(oldDoc.body, newDoc.body, marked);
+    }
+
+    if (marked.size > 0) {
+        const style = newDoc.createElement("style");
+        style.id = DIFF_STYLE_ID;
+        style.textContent = [
+            `html[data-show-diff="1"] [data-diff-status]{outline:2px dashed #ef4444!important;outline-offset:2px!important;background-color:rgba(239,68,68,.08)!important;position:relative;}`,
+            `html[data-show-diff="1"] [data-diff-status="added"]{outline-color:#dc2626!important;background-color:rgba(220,38,38,.10)!important;}`,
+            `html[data-show-diff="1"] [data-diff-status]::after{content:attr(data-diff-label);position:absolute;top:-10px;right:4px;padding:1px 6px;border-radius:999px;background:#ef4444;color:#fff;font:700 10px/1.4 system-ui,sans-serif;pointer-events:none;z-index:9999;white-space:nowrap;box-shadow:0 2px 6px rgba(239,68,68,.35);}`,
+        ].join("\n");
+        (newDoc.head || newDoc.body).appendChild(style);
+        newDoc.documentElement.setAttribute("data-show-diff", "1");
+    }
+
+    return { html: `<!DOCTYPE html>\n${newDoc.documentElement.outerHTML}`, count: marked.size };
+}
+
+function CompareView({
+    screen,
+    versions,
+    leftVersion,
+    rightVersion,
+    onChangeLeft,
+    onChangeRight,
+    onClose,
+}: {
+    screen: Screen;
+    versions: ScreenVersion[];
+    leftVersion: number;
+    rightVersion: number;
+    onChangeLeft: (v: number) => void;
+    onChangeRight: (v: number) => void;
+    onClose: () => void;
+}) {
+    const defaultH = screen.platform === "mobile" ? 844 : screen.platform === "tablet" ? 1024 : 900;
+    const screenW = screen.width ?? (screen.platform === "mobile" ? 390 : 1440);
+    const [leftDoc, setLeftDoc] = useState("");
+    const [rightDoc, setRightDoc] = useState("");
+    const [leftH, setLeftH] = useState(defaultH);
+    const [rightH, setRightH] = useState(defaultH);
+    const [showDiff, setShowDiff] = useState(true);
+    const [syncScroll, setSyncScroll] = useState(true);
+    const [scale, setScale] = useState(0.75);
+
+    const stageRef = useRef<HTMLDivElement>(null);
+    const leftFrameRef = useRef<HTMLIFrameElement>(null);
+    const rightFrameRef = useRef<HTMLIFrameElement>(null);
+    const leftScrollRef = useRef<HTMLDivElement>(null);
+    const rightScrollRef = useRef<HTMLDivElement>(null);
+    const syncingScroll = useRef(false);
+
+    useEffect(() => {
+        let active = true;
+        setLeftDoc("");
+        setRightDoc("");
+        setLeftH(defaultH);
+        setRightH(defaultH);
+        Promise.all([
+            api.screenDocument(SESSION, screen.id, leftVersion),
+            api.screenDocument(SESSION, screen.id, rightVersion),
+        ])
+            .then(([l, r]) => {
+                if (!active) return;
+                setLeftDoc(l);
+                setRightDoc(r);
+            })
+            .catch(() => undefined);
+        return () => {
+            active = false;
+        };
+    }, [screen.id, leftVersion, rightVersion, defaultH]);
+
+    useEffect(() => {
+        const el = stageRef.current;
+        if (!el) return;
+        const updateScale = () => {
+            const available = el.clientWidth - COMPARE_GAP_PX - COMPARE_PADDING_PX;
+            const fit = available / 2 / screenW;
+            setScale(Math.min(1, Math.max(0.35, Math.round(fit * 100) / 100)));
+        };
+        updateScale();
+        const observer = new ResizeObserver(updateScale);
+        observer.observe(el);
+        return () => observer.disconnect();
+    }, [screenW]);
+
+    useEffect(() => {
+        const onMsg = (e: MessageEvent) => {
+            const d = e.data as { type?: string; height?: number };
+            if ((d?.type === "ready" || d?.type === "resize") && d.height) {
+                if (e.source === leftFrameRef.current?.contentWindow) setLeftH(d.height);
+                else if (e.source === rightFrameRef.current?.contentWindow) setRightH(d.height);
+            }
+        };
+        window.addEventListener("message", onMsg);
+        return () => window.removeEventListener("message", onMsg);
+    }, []);
+
+    useEffect(() => {
+        rightFrameRef.current?.contentWindow?.postMessage({ type: "designer:diff", show: showDiff }, "*");
+    }, [showDiff]);
+
+    const diffResult = useMemo(
+        () => (leftDoc && rightDoc ? annotateDiffHtml(leftDoc, rightDoc) : { html: rightDoc, count: 0 }),
+        [leftDoc, rightDoc],
+    );
+
+    const handleScroll = (source: "left" | "right") => {
+        if (!syncScroll || syncingScroll.current) return;
+        const from = source === "left" ? leftScrollRef.current : rightScrollRef.current;
+        const to = source === "left" ? rightScrollRef.current : leftScrollRef.current;
+        if (!from || !to) return;
+        syncingScroll.current = true;
+        to.scrollTop = from.scrollTop;
+        requestAnimationFrame(() => {
+            syncingScroll.current = false;
+        });
+    };
+
+    const versionOptions = versions.map((v) => ({
+        value: v.version,
+        label: `v${v.version}${v.version === screen.version ? " · mới nhất" : ""}${v.note ? ` · ${v.note}` : ""}`,
+    }));
+
+    const leftContentH = Math.max(defaultH, leftH);
+    const rightContentH = Math.max(defaultH, rightH);
+
+    return (
+        <section className="canvas-compare-wrap" aria-label="So sánh phiên bản màn hình">
+            <div className="canvas-compare-bar">
+                <div className="canvas-compare-versions">
+                    <CanvasPicker icon={History} title="Phiên bản trước (trái)" value={leftVersion} options={versionOptions} onChange={(v) => onChangeLeft(Number(v))} />
+                    <ArrowRight size={14} />
+                    <CanvasPicker icon={History} title="Phiên bản sau (phải)" value={rightVersion} options={versionOptions} onChange={(v) => onChangeRight(Number(v))} />
+                </div>
+                <div className="canvas-compare-controls">
+                    <button
+                        type="button"
+                        className={`canvas-compare-diff-toggle ${showDiff ? "active" : ""}`}
+                        onClick={() => setShowDiff((v) => !v)}
+                    >
+                        <span className="canvas-compare-diff-dot" aria-hidden />
+                        Khoanh đỏ chỗ sửa ({diffResult.count} vùng)
+                    </button>
+                    <label className="canvas-compare-sync">
+                        <input type="checkbox" checked={syncScroll} onChange={(e) => setSyncScroll(e.target.checked)} />
+                        Đồng bộ cuộn
+                    </label>
+                    <button type="button" className="canvas-tool" onClick={onClose}>
+                        <X size={14} /> Đóng so sánh
+                    </button>
+                </div>
+            </div>
+            <div className="canvas-compare-stage" ref={stageRef}>
+                <div className="canvas-compare-grid">
+                    <div className="canvas-compare-col">
+                        <div className="canvas-compare-col-head">
+                            <strong>Trước · v{leftVersion}</strong>
+                            <span className="canvas-compare-badge-neutral">Chưa sửa đổi</span>
+                        </div>
+                        <div
+                            className="canvas-compare-viewport"
+                            ref={leftScrollRef}
+                            onScroll={() => handleScroll("left")}
+                            style={{ width: screenW * scale, height: defaultH * scale }}
+                        >
+                            {leftDoc ? (
+                                <div className="canvas-compare-viewport-inner" style={{ width: screenW * scale, height: leftContentH * scale }}>
+                                    <iframe
+                                        ref={leftFrameRef}
+                                        title={`${screen.name} v${leftVersion}`}
+                                        sandbox="allow-scripts allow-forms"
+                                        srcDoc={noScrollDoc(leftDoc)}
+                                        style={{ width: screenW, height: leftContentH, transform: `scale(${scale})` }}
+                                    />
+                                </div>
+                            ) : (
+                                <div className="canvas-compare-loading">Đang tải v{leftVersion}…</div>
+                            )}
+                        </div>
+                    </div>
+                    <div className="canvas-compare-col canvas-compare-col-after">
+                        <div className="canvas-compare-col-head">
+                            <strong>Sau · v{rightVersion}</strong>
+                            <span className={diffResult.count > 0 ? "canvas-compare-badge-diff" : "canvas-compare-badge-neutral"}>
+                                {diffResult.count > 0 ? `${diffResult.count} vùng thay đổi` : "Không có khác biệt"}
+                            </span>
+                        </div>
+                        <div
+                            className="canvas-compare-viewport"
+                            ref={rightScrollRef}
+                            onScroll={() => handleScroll("right")}
+                            style={{ width: screenW * scale, height: defaultH * scale }}
+                        >
+                            {rightDoc ? (
+                                <div className="canvas-compare-viewport-inner" style={{ width: screenW * scale, height: rightContentH * scale }}>
+                                    <iframe
+                                        ref={rightFrameRef}
+                                        title={`${screen.name} v${rightVersion}`}
+                                        sandbox="allow-scripts allow-forms"
+                                        srcDoc={noScrollDoc(diffResult.html)}
+                                        onLoad={() => rightFrameRef.current?.contentWindow?.postMessage({ type: "designer:diff", show: showDiff }, "*")}
+                                        style={{ width: screenW, height: rightContentH, transform: `scale(${scale})` }}
+                                    />
+                                </div>
+                            ) : (
+                                <div className="canvas-compare-loading">Đang tải v{rightVersion}…</div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+    );
+}
+
 function ScreensCanvas({ onBack, initialScreenId }: { onBack?: () => void; initialScreenId?: string }) {
     const { resolvedTheme, toggleTheme } = useTheme();
     const [screens, setScreens] = useState<Screen[]>([]);
@@ -500,7 +885,13 @@ function ScreensCanvas({ onBack, initialScreenId }: { onBack?: () => void; initi
     const [editPanelOpen, setEditPanelOpen] = useState(true);
     const [editError, setEditError] = useState("");
     const [syncLabel, setSyncLabel] = useState("Chat được đồng bộ");
+    const [selectedElements, setSelectedElements] = useState<SelectedElementChip[]>([]);
+    const [compareOpen, setCompareOpen] = useState(false);
+    const [compareLeftVersion, setCompareLeftVersion] = useState<number>();
+    const [compareRightVersion, setCompareRightVersion] = useState<number>();
     const frameRef = useRef<HTMLIFrameElement>(null);
+    const editInputRef = useRef<HTMLTextAreaElement>(null);
+    const chatThreadEndRef = useRef<HTMLDivElement>(null);
     const initialSelectionApplied = useRef(false);
 
     // Build the back-to-chat URL from the current page's query params.
@@ -585,6 +976,9 @@ function ScreensCanvas({ onBack, initialScreenId }: { onBack?: () => void; initi
         setState("");
         setVersion(undefined);
         setTestPanelOpen(false);
+        setCompareOpen(false);
+        setCompareLeftVersion(undefined);
+        setCompareRightVersion(undefined);
     }, [screen?.id]);
 
     const post = (message: Record<string, unknown>) => frameRef.current?.contentWindow?.postMessage(message, "*");
@@ -602,8 +996,16 @@ function ScreensCanvas({ onBack, initialScreenId }: { onBack?: () => void; initi
                 else setToast(`Chưa có màn hình "${message.screen}"`);
             } else if (message.type === "select" && screen) {
                 channel?.postMessage({ type: "select", screenId: screen.id, screenName: screen.name, element: message.element });
-                setToast(`Đã gửi phần tử "${message.element.text.slice(0, 40) || message.element.tag}" sang khung chat`);
+                const key = `${screen.id}:${message.element.id}`;
+                setSelectedIds((items) => (items.includes(screen.id) ? items : [...items, screen.id]));
+                setSelectedElements((items) => [
+                    ...items.filter((item) => item.key !== key),
+                    { key, screenId: screen.id, screenName: screen.name, ...message.element },
+                ]);
+                setEditPanelOpen(true);
+                setToast(`Đã gắn "${message.element.text.slice(0, 36) || message.element.tag}" vào khung chat`);
                 setSelecting(false);
+                requestAnimationFrame(() => editInputRef.current?.focus());
             }
         },
         [screens, screen, channel, state, selecting],
@@ -634,11 +1036,37 @@ function ScreensCanvas({ onBack, initialScreenId }: { onBack?: () => void; initi
         const ids = match?.[1].split(",").map((item) => item.split("@")[0]) ?? [];
         return ids.some((id) => selectedIds.includes(id));
     });
+    const orderedChatRuns = useMemo(() => [...visibleEditRuns].reverse(), [visibleEditRuns]);
+
+    useEffect(() => {
+        chatThreadEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }, [orderedChatRuns.length]);
+
+    const openCompare = useCallback((leftVer?: number, rightVer?: number) => {
+        if (versions.length < 2) return;
+        const right = rightVer ?? versions[0]?.version;
+        const left = leftVer ?? versions[1]?.version ?? versions[0]?.version;
+        if (left == null || right == null) return;
+        setViewMode("single");
+        setCodeOpen(false);
+        setSelecting(false);
+        setTestPanelOpen(false);
+        setCompareLeftVersion(left);
+        setCompareRightVersion(right);
+        setCompareOpen(true);
+    }, [versions]);
 
     const submitScreenEdit = async () => {
         if (!editPrompt.trim() || !selectedScreens.length || editBusy) return;
         const targetText = selectedScreens.map((item) => `${item.id}@${item.version}`).join(",");
-        const prompt = `[[DESIGNER_SCREEN_EDIT:${targetText}]]\n${editPrompt.trim()}`;
+        const elementLines = selectedElements.map((el) => {
+            const label = el.text.replace(/\s+/g, " ").trim().slice(0, 80);
+            return `- <${el.tag}> "${label}" (id=${el.id}, screen=${el.screenName}): ${el.html}`;
+        });
+        const body = elementLines.length
+            ? `${ELEMENT_CONTEXT_HEADER}\n${elementLines.join("\n")}\n\n${editPrompt.trim()}`
+            : editPrompt.trim();
+        const prompt = `[[DESIGNER_SCREEN_EDIT:${targetText}]]\n${body}`;
         setEditBusy(true);
         setEditError("");
         setSyncLabel("Đang đồng bộ hội thoại…");
@@ -651,6 +1079,7 @@ function ScreensCanvas({ onBack, initialScreenId }: { onBack?: () => void; initi
             });
             setEditRuns((items) => [run, ...items.filter((item) => item.id !== run.id)]);
             setEditPrompt("");
+            setSelectedElements([]);
             setSyncLabel("Đã đồng bộ vào hội thoại Designer");
             void loadEditRuns();
         } catch (error) {
@@ -838,18 +1267,29 @@ function ScreensCanvas({ onBack, initialScreenId }: { onBack?: () => void; initi
                                 ]}
                                 onChange={(v) => setVersion(v ? Number(v) : undefined)}
                             />
+                            {versions.length >= 2 && (
+                                <button
+                                    className={`canvas-tool ${compareOpen ? "active" : ""}`}
+                                    onClick={() => (compareOpen ? setCompareOpen(false) : openCompare())}
+                                    type="button"
+                                    title="So sánh v1 và v2 song song và khoanh đỏ chỗ sửa"
+                                >
+                                    <GitCompareArrows size={15} /> So sánh
+                                </button>
+                            )}
                             <span className="canvas-divider" aria-hidden />
                             <button
                                 className={`canvas-tool ${selecting ? "active" : ""}`}
                                 onClick={() => setSelecting(!selecting)}
                                 type="button"
+                                disabled={compareOpen || codeOpen}
                                 title="Chọn một phần tử để góp ý ở khung chat"
                             >
                                 <MousePointerClick size={15} /> Chọn phần tử
                             </button>
                             <button
                                 className={`canvas-tool ${codeOpen ? "active" : ""}`}
-                                onClick={() => setCodeOpen(!codeOpen)}
+                                onClick={() => { setCompareOpen(false); setCodeOpen(!codeOpen); }}
                                 type="button"
                                 title="Sửa HTML của màn hình"
                             >
@@ -885,6 +1325,16 @@ function ScreensCanvas({ onBack, initialScreenId }: { onBack?: () => void; initi
                         </section>
                     ) : viewMode === "multi"
                         ? <MultiView screens={screens} selectedId={screen?.id ?? ""} onSelect={(id) => { setCurrent(id); setCodeScreenId(id); setState(""); setVersion(undefined); setViewMode("single"); }} />
+                        : compareOpen && screen && versions.length >= 2 && compareLeftVersion != null && compareRightVersion != null
+                            ? <CompareView
+                                screen={screen}
+                                versions={versions}
+                                leftVersion={compareLeftVersion}
+                                rightVersion={compareRightVersion}
+                                onChangeLeft={setCompareLeftVersion}
+                                onChangeRight={setCompareRightVersion}
+                                onClose={() => setCompareOpen(false)}
+                              />
                         : selectedScreens.length > 1
                             ? <MultiView screens={selectedScreens} selectedId={screen?.id ?? ""} layout="selected" onSelect={(id) => { setCurrent(id); setCodeScreenId(id); setState(""); setVersion(undefined); }} />
                             : doc && <Frame doc={doc} width={width} onMessage={onMessage} frameRef={frameRef} />
@@ -893,56 +1343,144 @@ function ScreensCanvas({ onBack, initialScreenId }: { onBack?: () => void; initi
             </main>
             {editPanelOpen && selectedScreens.length > 0 && <aside className="canvas-edit-panel" aria-label="Chỉnh sửa màn hình bằng chat">
                 <header className="canvas-edit-header">
-                    <div><strong>Chỉnh sửa bằng chat</strong><small>Yêu cầu được lưu trong hội thoại Designer</small></div>
-                    <span className="canvas-edit-count">{selectedScreens.length} màn hình</span>
-                </header>
-                <section className="canvas-edit-targets">
-                    <strong>Phạm vi chỉnh sửa</strong>
-                    <p>{selectedScreens.length > 1 ? "Áp dụng riêng yêu cầu cho từng màn hình đã chọn." : selectedScreens.length === 1 ? "Chỉ áp dụng cho màn hình đang chọn." : "Chọn ít nhất một màn hình ở danh sách bên trái."}</p>
+                    <div className="canvas-edit-header-top">
+                        <strong>Chỉnh sửa bằng chat</strong>
+                        <div className="canvas-edit-header-actions">
+                            <button
+                                type="button"
+                                className="canvas-chat-undo"
+                                title="Hoàn tác màn hình đang xem về phiên bản trước"
+                                onClick={() => void undoCurrentScreen()}
+                                disabled={!screen || !versions.some((item) => item.version < (screen?.version ?? 0))}
+                            >
+                                <RotateCcw size={13} /> Hoàn tác
+                            </button>
+                            <button type="button" className="canvas-icon" title="Đóng khung chat" onClick={() => setEditPanelOpen(false)}>
+                                <X size={15} />
+                            </button>
+                        </div>
+                    </div>
                     <div className="canvas-edit-chips">
                         {selectedScreens.map((item) => <span key={item.id}>#{item.position + 1} {item.name}</span>)}
                     </div>
-                </section>
-                <form className="canvas-edit-form" onSubmit={(event) => { event.preventDefault(); void submitScreenEdit(); }}>
-                    <textarea value={editPrompt} onChange={(event) => setEditPrompt(event.target.value)}
-                        placeholder="Mô tả thay đổi cần thực hiện…" rows={4} disabled={editBusy || pendingEdit || !selectedScreens.length} />
-                    <div className="canvas-edit-form-footer">
-                        <span>Giữ nguyên bố cục và nội dung ngoài phạm vi yêu cầu.</span>
-                        <button className="primary-button" type="submit" disabled={!editPrompt.trim() || !selectedScreens.length || editBusy || pendingEdit}>
-                            {editBusy || pendingEdit ? "Đang xử lý…" : "Gửi yêu cầu"} <ArrowRight size={14} />
-                        </button>
-                    </div>
-                </form>
-                {editError && <div className="canvas-edit-error" role="alert">{editError}</div>}
-                <section className="canvas-edit-history">
-                    <div className="canvas-edit-history-title"><strong><History size={15} /> Lịch sử chỉnh sửa</strong>
-                        <button type="button" onClick={() => void undoCurrentScreen()} disabled={!screen || !versions.some((item) => item.version < (screen?.version ?? 0))}>
-                            <ArrowLeft size={13} /> Hoàn tác màn đang xem
-                        </button>
-                    </div>
-                    {!visibleEditRuns.length && <p className="canvas-edit-empty">Chưa có yêu cầu chỉnh sửa cho màn hình đang chọn.</p>}
-                    {visibleEditRuns.slice(0, 5).map((run) => {
-                        const cleanPrompt = run.prompt.replace(SCREEN_EDIT_MARKER, "").trim();
+                </header>
+
+                <div className="canvas-chat-thread">
+                    {!orderedChatRuns.length && (
+                        <div className="canvas-chat-empty">
+                            <strong>Chưa có chỉnh sửa nào</strong>
+                            Bấm <em>Chọn phần tử</em> trên màn hình hoặc nhập yêu cầu bên dưới để chỉnh sửa trực tiếp màn hình đang chọn.
+                        </div>
+                    )}
+                    {orderedChatRuns.map((run) => {
+                        const parsed = parseEditPrompt(run.prompt);
                         const pending = run.status === "running" || run.status === "queued";
                         const failed = run.status === "failed" || run.status === "blocked";
-                        return <article className="canvas-edit-history-item" key={run.id}>
-                            <div className={`canvas-edit-run-status ${failed ? "failed" : pending ? "pending" : "done"}`}>
-                                {pending ? "Đang xử lý" : failed ? "Không áp dụng được" : "Đã áp dụng"} · {new Date(run.created_at).toLocaleString()}
+                        const shortTime = new Date(run.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+                        return (
+                            <div className="canvas-chat-turn" key={run.id}>
+                                <div className="canvas-chat-bubble canvas-chat-bubble-user">
+                                    {parsed.elements.length > 0 && (
+                                        <div className="canvas-chat-el-tags">
+                                            {parsed.elements.map((label, idx) => (
+                                                <span className="canvas-chat-el-tag" key={`${run.id}-el-${idx}`}>
+                                                    <Crosshair size={11} /> {label}
+                                                </span>
+                                            ))}
+                                        </div>
+                                    )}
+                                    <p>{parsed.text}</p>
+                                </div>
+                                <div className="canvas-chat-bubble canvas-chat-bubble-ai">
+                                    <div className="canvas-chat-ai-head">
+                                        <span className={`canvas-edit-run-status ${failed ? "failed" : pending ? "pending" : "done"}`}>
+                                            {pending ? "● Đang xử lý…" : failed ? "● Không áp dụng được" : "● Đã áp dụng"}
+                                        </span>
+                                        <time>{shortTime}</time>
+                                    </div>
+                                    {run.assistant_message && <small>{run.assistant_message}</small>}
+                                    {failed && run.error?.detail && <small className="canvas-edit-run-error">{run.error.detail}</small>}
+                                    {!pending && !failed && versions.length >= 2 && (
+                                        <button
+                                            type="button"
+                                            className="canvas-chat-compare-btn"
+                                            onClick={() => openCompare(versions[1].version, versions[0].version)}
+                                        >
+                                            <GitCompareArrows size={13} /> So sánh v{versions[1].version} ↔ v{versions[0].version}
+                                        </button>
+                                    )}
+                                    {failed && run.error?.code === "SCREEN_VERSION_CONFLICT" && (
+                                        <button className="canvas-edit-reload" type="button" onClick={() => {
+                                            void loadScreens().then(() => api.listScreens(SESSION)).then((items) => {
+                                                const targetId = run.prompt.match(SCREEN_EDIT_MARKER)?.[1].split(",")[0].split("@")[0];
+                                                if (targetId && items.some((item) => item.id === targetId)) setCurrent(targetId);
+                                                setVersion(undefined);
+                                                setEditError("Màn hình đã được cập nhật phiên bản mới. Hãy kiểm tra nội dung mới trước khi gửi lại yêu cầu.");
+                                            }).catch((error) => setEditError((error as Error).message));
+                                        }}>Tải phiên bản mới</button>
+                                    )}
+                                </div>
                             </div>
-                            <p>{cleanPrompt}</p>
-                            {run.assistant_message && <small>{run.assistant_message}</small>}
-                            {failed && run.error?.detail && <small className="canvas-edit-run-error">{run.error.detail}</small>}
-                            {failed && run.error?.code === "SCREEN_VERSION_CONFLICT" && <button className="canvas-edit-reload" type="button" onClick={() => {
-                                void loadScreens().then(() => api.listScreens(SESSION)).then((items) => {
-                                    const targetId = run.prompt.match(SCREEN_EDIT_MARKER)?.[1].split(",")[0].split("@")[0];
-                                    if (targetId && items.some((item) => item.id === targetId)) setCurrent(targetId);
-                                    setVersion(undefined);
-                                    setEditError("Màn hình đã được cập nhật phiên bản mới. Hãy kiểm tra nội dung mới trước khi gửi lại yêu cầu.");
-                                }).catch((error) => setEditError((error as Error).message));
-                            }}>Tải phiên bản mới</button>}
-                        </article>;
+                        );
                     })}
-                </section>
+                    <div ref={chatThreadEndRef} />
+                </div>
+
+                <div className="canvas-chat-composer">
+                    {editError && <div className="canvas-edit-error" role="alert">{editError}</div>}
+                    {selectedElements.length > 0 && (
+                        <div className="canvas-selected-el-bar" aria-label="Phần tử đang đính kèm">
+                            {selectedElements.map((el) => (
+                                <span className="canvas-selected-el-chip" key={el.key} title={`${el.screenName} · <${el.tag}> ${el.text}`}>
+                                    <Crosshair size={12} />
+                                    <span>{el.text.replace(/\s+/g, " ").trim() || el.tag}</span>
+                                    <small>{el.tag}</small>
+                                    <button
+                                        type="button"
+                                        aria-label={`Gỡ phần tử ${el.text || el.tag}`}
+                                        onClick={() => setSelectedElements((items) => items.filter((item) => item.key !== el.key))}
+                                    >
+                                        <X size={11} />
+                                    </button>
+                                </span>
+                            ))}
+                        </div>
+                    )}
+                    <form className="canvas-edit-form" onSubmit={(event) => { event.preventDefault(); void submitScreenEdit(); }}>
+                        <textarea
+                            ref={editInputRef}
+                            value={editPrompt}
+                            onChange={(event) => setEditPrompt(event.target.value)}
+                            onKeyDown={(event) => {
+                                if (event.key === "Enter" && !event.shiftKey) {
+                                    event.preventDefault();
+                                    void submitScreenEdit();
+                                }
+                            }}
+                            placeholder={selectedElements.length ? "Mô tả thay đổi cho phần tử đã chọn…" : "Mô tả thay đổi cần thực hiện…"}
+                            rows={2}
+                            disabled={editBusy || pendingEdit || !selectedScreens.length}
+                        />
+                        <button
+                            className="primary-button canvas-chat-send"
+                            type="submit"
+                            disabled={!editPrompt.trim() || !selectedScreens.length || editBusy || pendingEdit}
+                        >
+                            {editBusy || pendingEdit ? "Đang gửi" : "Gửi"} <ArrowRight size={13} />
+                        </button>
+                    </form>
+                    <div className="canvas-chat-composer-tools">
+                        <button
+                            type="button"
+                            className={`canvas-chat-pick-btn ${selecting ? "active" : ""}`}
+                            onClick={() => setSelecting(!selecting)}
+                            disabled={viewMode !== "single" || codeOpen || compareOpen}
+                        >
+                            <MousePointerClick size={13} /> {selecting ? "Đang chọn phần tử…" : "Chọn phần tử"}
+                        </button>
+                        <span className="canvas-chat-hint">Enter gửi · Shift+Enter xuống dòng</span>
+                    </div>
+                </div>
             </aside>}
             {toast && <div className="canvas-toast">{toast}</div>}
         </div>
