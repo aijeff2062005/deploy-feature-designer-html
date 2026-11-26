@@ -34,9 +34,12 @@ class WorkflowData(BaseModel):
     workflow_md_content: str | None = Field(
         None,
         description=(
-            "Full workflow markdown. Bắt buộc có các section: "
-            "## Main Flow (bảng | Step | Actor | Action | BR Ref |, ≥3 bước), "
-            "## Exception Flows, ## End States, và tùy chọn ## Sequence Diagram (mermaid). "
+            "Full workflow markdown. Bắt buộc có các section dạng bảng: "
+            "## Main Flow (bảng | Step | Actor | Action | BR | Gateway |, BẮT BUỘC ≥3 bước; mỗi dòng chỉ 1 hành động của 1 Actor — tách riêng bước User thao tác và bước System xử lý/xác thực/bàn giao), "
+            "## Alternative Flows (bảng | Step | Actor | Action | BR | Gateway |, đủ mọi nhánh rẽ kể cả Đăng xuất nếu có), "
+            "## Exception Flows (BẮT BUỘC dùng bảng | Step | Actor | Action | BR | Gateway |, không dùng bullet list), "
+            "## End States (bảng | ID | Description | Branch Condition |, đủ ES-xx cho mọi nhánh). "
+            "Chỉ đặt Gateway=XOR tại bước User chọn nhiều hướng hoặc bước System kiểm tra điều kiện rẽ E-xx; bước nhập liệu/CTA đơn dùng None. Dùng mũi tên Unicode → (không dùng LaTeX \\rightarrow). "
             "Chỉ cập nhật khi User cung cấp/chỉnh sửa luồng."
         ),
     )

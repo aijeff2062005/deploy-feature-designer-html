@@ -61,6 +61,13 @@ def _preserve_omitted_workflows(previous: str, updated: str) -> tuple[str, list[
     return updated, omitted
 
 
+def _sanitize_workflow_markdown(text: str) -> str:
+    """Normalize LaTeX arrow artifacts (including JSON-escaped \\r + ightarrow) to Unicode →."""
+    cleaned = re.sub(r"\$\s*(?:\\rightarrow|[\r\s]*ightarrow)\s*\$", "→", text)
+    cleaned = re.sub(r"(?:\\rightarrow|\bightarrow\b)", "→", cleaned)
+    return cleaned
+
+
 async def wf_merge_callback(
     callback_context: CallbackContext, llm_response: LlmResponse
 ) -> None:
@@ -83,8 +90,9 @@ async def wf_merge_callback(
     preserved: list[str] = []
     content_changed = False
     if parsed.workflow_md_content and parsed.workflow_md_content.strip():
+        sanitized_md = _sanitize_workflow_markdown(parsed.workflow_md_content.strip())
         updated_content, preserved = _preserve_omitted_workflows(
-            previous_content, parsed.workflow_md_content.strip()
+            previous_content, sanitized_md
         )
         wf["workflow_md_content"] = updated_content
         content_changed = updated_content != previous_content
@@ -341,11 +349,15 @@ _wf_extractor = LlmAgent(
     instruction=(
         "Trích xuất/cập nhật workflow markdown NGẮN GỌN cho **một** luồng/story tại một thời điểm. "
         "Artifact workflow có thể chứa NHIỀU workflow. Khi sửa một WF-ID, phải giữ nguyên đầy đủ mọi WF-ID khác và mọi bước/BR Ref hiện có; không được thay toàn bộ artifact bằng riêng luồng đang sửa. Trả lại toàn bộ nội dung workflow sau khi merge. "
-        "Main Flow và Exception Flows dùng bảng cột: "
+        "Main Flow, Alternative Flows VÀ Exception Flows ĐỀU PHẢI dùng chung định dạng bảng Markdown 5 cột: "
         "`Step | Actor | Action | BR | Gateway` "
-        "(Gateway = XOR hoặc AND hoặc để trống). "
+        "(TUYỆT ĐỐI KHÔNG viết Exception Flows dưới dạng tiêu đề con #### E-01 + gạch đầu dòng, vì parser chỉ đọc được bảng; End States dùng bảng `| ID | Description | Branch Condition |`). "
         "Actors phải khớp FD actors (sẽ thành lanes). "
-        "Main Flow ≥3 bước, Exception Flows, End States. "
+        "Main Flow BẮT BUỘC có ≥3 dòng (Step), mỗi dòng chỉ là 1 hành động nguyên tử của ĐÚNG 1 Actor — TUYỆT ĐỐI KHÔNG gộp thao tác của User (nhập/bấm CTA) và xử lý của System (xác thực/cấp token/điều hướng/bàn giao) vào chung 1 Step; nếu user mô tả gộp, phải tự tách thành từng Step riêng theo Actor để có ≥3 bước rõ ràng cho BPMN swimlanes. "
+        "Đặt cổng Gateway `XOR` đúng chuẩn BPMN: chỉ đặt `XOR` ở bước User có nhiều lựa chọn rẽ nhánh khác nhau (hoặc bước System kiểm tra/đánh giá điều kiện rẽ sang `E-xx` khi lỗi); KHÔNG đặt `XOR` ở các bước nhập liệu đơn thuần hay bấm 1 nút CTA đơn (dùng `None`). "
+        "Đầy đủ nhánh, không để XOR treo: mọi nhánh phụ được nhắc tới ở tiêu đề hoặc cổng `XOR` (như Đăng ký, Quên mật khẩu, Đăng xuất...) PHẢI có đầy đủ các bước trong `Alternative Flows` và dòng tương ứng trong `End States` (`ES-01`, `ES-02`...). "
+        "LUÔN dùng ký tự mũi tên Unicode `→` trong văn bản thường; TUYỆT ĐỐI KHÔNG dùng LaTeX (`$\\rightarrow$`, `\\rightarrow`). "
+        "Bao gồm đủ Exception Flows và End States. "
         "Không lặp lại toàn bộ BR — chỉ tham chiếu BR-XX."
         "For every confirmed Feature Definition handoff, return one handoff_mappings entry with its 1-based handoff_index and the exact Workflow End State ID. Mappings must be complete and one-to-one: no two handoffs may use the same Workflow End State ID. "
         "When distinct confirmed branches currently share one broad End State (for example, all roles mapped to Login Success), split that outcome into one role/branch-specific End State per handoff, assign each a unique unused Workflow End State ID, update the complete workflow markdown, and map each handoff to its matching ID. Do this from the existing branch conditions and destinations; do not ask the user to invent technical IDs. "
@@ -377,8 +389,9 @@ _wf_discussion = LlmAgent(
     instruction=(
         "Bạn là BA Agent section Workflow. "
         "Xác nhận Main Flow / Exception / End States cho **một** luồng tại một thời điểm. "
-        "Bảng bước dùng cột `Step | Actor | Action | BR | Gateway` "
-        "với Gateway XOR (nhánh độc quyền) hoặc AND (song song) hoặc để trống. "
+        "Main Flow, Alternative Flows và Exception Flows đều dùng chung bảng cột `Step | Actor | Action | BR | Gateway` (không viết Exception Flows kiểu #### + bullet), End States dùng bảng `| ID | Description | Branch Condition |`. "
+        "Đặt `XOR` đúng vai trò BPMN: chỉ đặt `XOR` ở bước User có nhiều lựa chọn rẽ nhánh hoặc bước System kiểm tra/validate điều kiện rẽ sang `E-xx`; các bước nhập liệu hoặc nhấn 1 CTA đơn dùng `None`. Đảm bảo mọi nhánh nêu ở tiêu đề hoặc `XOR` (như Đăng xuất) đều có đủ bước `AF-xx` và `ES-xx` tương ứng. Luôn dùng mũi tên Unicode `→`, không dùng LaTeX `\\rightarrow`. "
+        "Main Flow phải có ≥3 bước nguyên tử (tách riêng bước thao tác của User và bước xử lý/phản hồi của System thành từng dòng theo Actor, không gộp 2 Actor vào 1 Step). "
         "Actors phải khớp Feature Definition (không invent Management/Supplier). "
         "Hỏi làm rõ theo CHECKLIST (ưu tiên required=true). "
         "Không dùng mã flag kỹ thuật (WF-F1…) trong câu trả lời User. "
