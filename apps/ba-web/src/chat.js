@@ -1626,6 +1626,139 @@ function finishTyping() {
   renderChatMessages();
 }
 
+function stripInlineTicks(text) {
+  return String(text || '').replace(/^\*{1,2}|\*{1,2}$/g, '').replace(/^`|`$/g, '').trim();
+}
+
+function parseMarkdownTable(lines) {
+  const splitCells = (row) => row.replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
+  const isRule = (row) => /^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?$/.test(row.trim());
+  const blocks = [];
+  let textBuf = [];
+  const flushText = () => {
+    const joined = textBuf.join('\n').trim();
+    if (joined) blocks.push({ type: 'text', text: joined });
+    textBuf = [];
+  };
+  for (let i = 0; i < lines.length; i += 1) {
+    const trimmed = lines[i].trim();
+    if (trimmed.startsWith('|') && i + 1 < lines.length && isRule(lines[i + 1])) {
+      flushText();
+      const headers = splitCells(trimmed).map((h) => stripInlineTicks(h));
+      const rows = [];
+      for (i += 2; i < lines.length && lines[i].trim().startsWith('|'); i += 1) {
+        rows.push(splitCells(lines[i].trim()));
+      }
+      i -= 1;
+      blocks.push({ type: 'table', headers, rows });
+    } else {
+      textBuf.push(lines[i]);
+    }
+  }
+  flushText();
+  return blocks;
+}
+
+function renderWorkflowVisual(md) {
+  const lines = String(md || '').replace(/\r\n/g, '\n').split('\n');
+  const sections = [];
+  let current = null;
+  for (const raw of lines) {
+    const m = raw.trim().match(/^(#{1,4})\s+(.+)$/);
+    if (m) {
+      if (current && (current.lines.some((l) => l.trim() && !/^-{3,}$/.test(l.trim())) || current.level > 2)) {
+        sections.push(current);
+      }
+      current = { level: m[1].length, title: stripInlineTicks(m[2]), lines: [] };
+    } else if (current) {
+      current.lines.push(raw);
+    }
+  }
+  if (current && current.lines.some((l) => l.trim() && !/^-{3,}$/.test(l.trim()))) {
+    sections.push(current);
+  }
+  if (!sections.length) {
+    return `<div class="ws-wf-md">${formatChatMarkdown(md)}</div>`;
+  }
+
+  const renderedSections = sections.map((sec) => {
+    const cleanedLines = sec.lines.filter((l) => !/^-{3,}$/.test(l.trim()));
+    const blocks = parseMarkdownTable(cleanedLines);
+    let itemCount = 0;
+    const bodyHtml = blocks.map((block) => {
+      if (block.type === 'text') {
+        return `<div class="ws-wf-md">${formatChatMarkdown(block.text)}</div>`;
+      }
+      const lowerHeaders = block.headers.map((h) => h.toLowerCase());
+      const stepIdx = lowerHeaders.findIndex((h) => h.includes('step') || h.includes('bước'));
+      const actorIdx = lowerHeaders.findIndex((h) => h.includes('actor') || h.includes('tác nhân'));
+      const actionIdx = lowerHeaders.findIndex((h) => h.includes('action') || h.includes('hành động') || h.includes('mô tả'));
+      const brIdx = lowerHeaders.findIndex((h) => h === 'br' || h.includes('br'));
+      const gwIdx = lowerHeaders.findIndex((h) => h.includes('gateway') || h.includes('rẽ nhánh'));
+      const isStepTable = stepIdx !== -1 && (actorIdx !== -1 || actionIdx !== -1);
+      itemCount += block.rows.length;
+
+      if (isStepTable) {
+        return `<div class="ws-wf-list">${block.rows.map((row) => {
+          const stepId = stripInlineTicks(row[stepIdx] || '?');
+          const actor = actorIdx !== -1 ? stripInlineTicks(row[actorIdx] || '') : '';
+          const action = actionIdx !== -1 ? (row[actionIdx] || '') : '';
+          const brRaw = brIdx !== -1 ? stripInlineTicks(row[brIdx] || '') : '';
+          const gwRaw = gwIdx !== -1 ? stripInlineTicks(row[gwIdx] || '') : '';
+          const gwClean = gwRaw && !/^(?:-|—|none|n\/a|na)$/i.test(gwRaw) ? gwRaw : '';
+          const brTags = brRaw && !/^(?:-|—|none|n\/a|na)$/i.test(brRaw)
+            ? brRaw.split(/[,;/]+/).map((s) => stripInlineTicks(s)).filter(Boolean)
+            : [];
+          return `
+            <div class="ws-item-card">
+              <div class="ws-item-header ws-wf-step-header">
+                <span class="ws-item-id">${escapeHtml(stepId)}</span>
+                ${actor ? `<span class="tag-chip chip-cyan">${escapeHtml(actor)}</span>` : ''}
+                ${gwClean ? `<span class="ws-meta-pill">${escapeHtml(gwClean)}</span>` : ''}
+              </div>
+              <div class="ws-item-body ws-wf-md">${formatChatMarkdown(action)}</div>
+              ${brTags.length ? `<div class="ws-wf-br-row">${brTags.map((b) => `<span class="tag-chip chip-amber">${escapeHtml(b)}</span>`).join('')}</div>` : ''}
+            </div>
+          `;
+        }).join('')}</div>`;
+      }
+
+      return `<div class="ws-wf-list">${block.rows.map((row) => {
+        const primary = stripInlineTicks(row[0] || '—');
+        const rest = block.headers.slice(1).map((header, idx) => {
+          const val = (row[idx + 1] || '').trim();
+          if (!val || val === '-' || val === '—') return '';
+          return `<div class="ws-item-body"><strong>${escapeHtml(header)}:</strong> <span class="ws-wf-inline">${formatChatMarkdown(val)}</span></div>`;
+        }).filter(Boolean).join('');
+        return `
+          <div class="ws-item-card ws-wf-end-card">
+            <div class="ws-item-header"><span class="ws-item-id">${escapeHtml(primary)}</span></div>
+            ${rest}
+          </div>
+        `;
+      }).join('')}</div>`;
+    }).join('');
+
+    return `
+      <details class="ws-wf-section" open>
+        <summary>
+          <span>${escapeHtml(sec.title)}</span>
+          ${itemCount ? `<span class="count-pill">${itemCount}</span>` : ''}
+        </summary>
+        ${bodyHtml}
+      </details>
+    `;
+  }).join('');
+
+  return `
+    <div class="ws-wf-visual">${renderedSections}</div>
+    <details class="ws-wf-raw">
+      <summary>Xem Markdown gốc</summary>
+      <textarea class="field-textarea ws-md-preview" readonly>${escapeHtml(md)}</textarea>
+    </details>
+  `;
+}
+
 function renderWorkspace() {
   destroyBpmnPreview();
   const sec = SECTIONS[activeSectionIndex];
@@ -1715,7 +1848,7 @@ function renderWorkspace() {
       ${memoryPanel}
       <div class="field-group">
         <label class="field-label">Mục tiêu (Goal)</label>
-        <textarea class="field-textarea" readonly placeholder="Mục tiêu sẽ hiển thị khi được định nghĩa...">${data.goal || ''}</textarea>
+        <textarea class="field-textarea" readonly placeholder="Mục tiêu sẽ hiển thị khi được định nghĩa...">${escapeHtml(data.goal || '')}</textarea>
       </div>
       <div class="field-group">
         <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -1780,9 +1913,10 @@ function renderWorkspace() {
 
   } else if (sec.id === 'workflow') {
     const md = data.workflow_md_content || '';
-    const hasMain = /##\s*Main Flow/i.test(md);
-    const hasExc = /##\s*Exception Flows/i.test(md);
-    const hasEnd = /##\s*End States/i.test(md);
+    const hasMain = /^#{1,4}\s*(?:\d+[.)]?\s*)?Main Flow\b/im.test(md);
+    const hasAlt = /^#{1,4}\s*(?:\d+[.)]?\s*)?Alternative Flows?\b/im.test(md);
+    const hasExc = /^#{1,4}\s*(?:\d+[.)]?\s*)?Exception Flows?\b/im.test(md);
+    const hasEnd = /^#{1,4}\s*(?:\d+[.)]?\s*)?(?:Workflow\s+)?End States?\b/im.test(md);
     wsEl.innerHTML = `
       <div class="field-group">
         <label class="field-label">Artifact</label>
@@ -1795,14 +1929,15 @@ function renderWorkspace() {
         <label class="field-label">Sections detected</label>
         <div class="tag-chips-container">
           <span class="tag-chip ${hasMain ? 'chip-emerald' : 'chip-amber'}">${hasMain ? '✓' : '○'} Main Flow</span>
+          ${hasAlt ? '<span class="tag-chip chip-emerald">✓ Alternative Flows</span>' : ''}
           <span class="tag-chip ${hasExc ? 'chip-emerald' : 'chip-amber'}">${hasExc ? '✓' : '○'} Exception Flows</span>
           <span class="tag-chip ${hasEnd ? 'chip-emerald' : 'chip-amber'}">${hasEnd ? '✓' : '○'} End States</span>
         </div>
       </div>
       <div class="field-group">
-        <label class="field-label">Workflow Markdown</label>
+        <label class="field-label">Workflow Steps &amp; States</label>
         ${md
-          ? `<textarea class="field-textarea ws-md-preview" readonly>${escapeHtml(md)}</textarea>`
+          ? renderWorkflowVisual(md)
           : emptyWorkspaceHint('Chưa có workflow. Mô tả Main Flow (≥3 bước) với Agent.')}
       </div>
     `;
