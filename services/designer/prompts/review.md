@@ -29,6 +29,8 @@ Keep default content visible on first paint. Keep bottom action bars outside scr
 
 The initial/default view must render visibly on first paint. Keep default content as ordinary visible HTML; do not hide it behind Alpine `x-show`, `x-cloak`, collapsed containers, or state-dependent visibility. For Splash, preserve only the approved initial/default content. Omit error variants from this build. Never put Test controls in the app screen.
 
+Targeted edit & layout anchor preservation: when the task asks for a specific user-requested change to an existing screen, apply the smallest SEARCH/REPLACE edit that satisfies the request and do not restyle or reposition unrelated sections. Preserve the vertical and horizontal anchor positions of untouched sibling blocks: if you must wrap two siblings (such as a header and a main content card) together to adjust their relative gap, transfer any centering or alignment classes (for example, `my-auto` or `justify-center`) onto the shared wrapper instead of dropping them and shifting the untouched block toward the top or bottom edge.
+
 Reply in ONE of these forms:
 - `OK` — only when the checks list no errors and the design needs no change;
 - one or more edit blocks, each copying an exact, unique snippet of the current HTML:

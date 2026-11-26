@@ -1008,8 +1008,12 @@ class HtmlDesigner:
         await self._trace_decision(run, "router.targets", "use valid targets, otherwise all spec screens", "build_screens", {
             "requested_targets": decision.target_screen_ids, "selected_targets": targets,
         })
+        has_pending_final = any(
+            r.id != run.id and r.stage == RunStage.REVIEW_FINAL and r.status == RunStatus.WAITING_REVIEW
+            for r in runs
+        )
         run = await self.store.update_run(run.id, intent=intent, assistant_message=decision.reply, specification=spec)
-        await self.build(run.id, targets, instruction=decision.instruction or run.prompt, review=False)
+        await self.build(run.id, targets, instruction=decision.instruction or run.prompt, review=has_pending_final)
 
     async def capture_project_wiki_visual_system(self, session: SessionView) -> dict[str, Any]:
         """Capture explicit design tokens and annotated component roles from every approved screen."""

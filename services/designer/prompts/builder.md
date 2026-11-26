@@ -14,6 +14,7 @@ Return ONLY the screen as an HTML body fragment — no `<html>`, `<head>`, `<scr
 - The page fills {{width}}px wide; nothing overflows horizontally; meet WCAG AA text contrast (4.5:1 normal text, 3:1 large text); for mobile previews make hit areas at least 48×48 CSS px as a renderer proxy. Native iOS guidance is 44×44 pt and Android guidance is 48×48 dp; CSS px are not those native units.
 - Keep all readable text and interactive controls fully inside their visible content column and safe area. Use `min-width:0`, `max-width:100%`, and `box-sizing:border-box` for flex/grid children and controls that must shrink. Do not put form/text content inside an `overflow:hidden` crop box; apply clipping only to a dedicated decorative image/background layer, which may intentionally bleed or crop within its region.
 - Keep it tight: under ~15,000 characters, no redundant wrappers or classes.
+- Keep the screen's brand/title header visually cohesive with its primary content block (for example, inside one shared flex column with deliberate spacing such as `gap-5` or `mb-6`). Avoid pinning the header to the top edge via `justify-between` while vertically centering the content card with `my-auto`, which creates an accidental empty gap between them.
 
 ## Art direction of this product
 {{direction}}
