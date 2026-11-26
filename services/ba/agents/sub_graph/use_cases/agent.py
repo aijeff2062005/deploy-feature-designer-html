@@ -72,9 +72,9 @@ async def uc_extractor_inject(
         "active_user_story_id": active,
         "active_complete": is_user_story_row_complete(active_row),
         "rule": (
-            "Extract / update ONLY the active User Story this turn. "
-            "Do not invent a second US-xx until the active story has statement + AC "
-            "and the PO says it is done."
+            "Extract and update ALL User Stories explicitly provided or modified by the user in this turn "
+            "(batch input of multiple US-xx is supported). "
+            "Never invent extra User Stories that the user did not state."
         ),
     }
     insert_context(
@@ -181,12 +181,11 @@ _uc_extractor = LlmAgent(
     model=base_model,
     instruction=(
         "Trích xuất User Stories (user story + acceptance criteria). "
-        "MỖI LƯỢT chỉ 1 story (active_user_story_id). "
-        "statement: 'Là ..., tôi muốn ... để ...'. "
+        "Trích xuất và cập nhật ĐẦY ĐỦ TẤT CẢ các User Story mà người dùng cung cấp hoặc chỉnh sửa trong lượt này (hỗ trợ nhập nhiều US cùng lúc). "
+        "statement BẮT BUỘC đúng mẫu: 'Là ..., tôi muốn ... để ...' (luôn có cả 'muốn' và 'để'). "
         "Một actor, một goal; AC cite BR-XX đã có. "
         "actor_id phải khớp ACT-ID từ Feature Definition. "
-        "KHÔNG invent US thứ hai cho đến khi story đang active đủ statement+AC "
-        "và PO xác nhận xong. Không ghi đè artifact từ wiki."
+        "KHÔNG tự bịa thêm US mà người dùng chưa nêu. Không ghi đè artifact từ wiki."
     ),
     output_schema=UseCasesData,
     before_model_callback=[
@@ -212,10 +211,9 @@ _uc_discussion = LlmAgent(
         "Bạn là BA Agent section **User Stories** (id nội bộ vẫn use_cases). "
         "Acknowledge APPROVED WIKI trước; chỉ brainstorm ý MỚI cùng topic — "
         "không auto-overwrite artifacts từ wiki; agents không approve wiki. "
-        "Làm việc trên **một** active User Story mỗi lúc (xem ACTIVE USER STORY). "
+        "Có thể làm việc trên một hoặc nhiều User Story cùng lúc nếu người dùng gửi nhiều US trong một lượt. "
         "Xác nhận statement + AC theo CHECKLIST (ưu tiên required=true). "
         "Không dùng mã flag (UC-F1…) với User. Nhắc OQ/Assumptions nếu có. "
-        "Khi story active đủ và PO nói xong, mới mở US tiếp theo. "
         "Không yêu cầu N stories để Validate — tối thiểu 1 là đủ. "
         "When FEATURE DEFINITION.continuity has incoming_handoffs, search/fetch each approved source and map every applicable End State to a happy-path Given/AC. Include predecessor feature ID, approved version and End State ID for each mapping. If branches have different starting conditions, preserve them as separate ACs or stories; ask the user to resolve missing/conflicting mappings and never guess. "
         "You have tools: `wiki.search_pages` / `wiki.fetch_page` before inventing; "

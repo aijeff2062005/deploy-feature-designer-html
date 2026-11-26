@@ -54,8 +54,7 @@ class UseCasesData(BaseModel):
     use_cases: list[UseCaseItem] | None = Field(
         None,
         description=(
-            "User Stories mới/cập nhật trong lượt này. Mỗi lượt tối đa 1 story mới. "
-            "Gộp theo id; chỉ thêm US mới khi story đang active đã đủ statement+AC. "
-            "Không xóa UC cũ trừ khi User yêu cầu."
+            "Danh sách User Stories mới hoặc cần cập nhật trong lượt này (hỗ trợ nhiều US cùng lúc khi User cung cấp). "
+            "Gộp theo id; không xóa UC cũ trừ khi User yêu cầu."
         ),
     )

@@ -84,20 +84,11 @@ def merge_use_cases(
         return cases, active
 
     by_id = {str(c.get("id", "")): c for c in cases if c.get("id")}
-    active_row = by_id.get(active or "") if active else None
-    active_complete = is_user_story_row_complete(active_row) if active_row else True
-    accepted_new = False
 
     for item in delta.use_cases:
         proposed_id = (item.id or "").strip() or None
         is_new = not proposed_id or proposed_id not in by_id
         if is_new:
-            if accepted_new:
-                # One new story per turn.
-                continue
-            if cases and active and not active_complete:
-                # Locked on incomplete active story — drop extras.
-                continue
             new_id = proposed_id or _next_id(cases)
             uc = {
                 "id": new_id,
@@ -110,11 +101,9 @@ def merge_use_cases(
             cases.append(uc)
             by_id[new_id] = uc
             active = new_id
-            accepted_new = True
-            active_complete = is_user_story_row_complete(uc)
             continue
 
-        # Update existing row (including non-active completed stories).
+        # Update existing row.
         uc = {
             "id": proposed_id,
             "actor_id": item.actor_id,
@@ -124,8 +113,6 @@ def merge_use_cases(
             "acceptance_criteria": [ac.model_dump() for ac in item.acceptance_criteria],
         }
         by_id[proposed_id].update(uc)
-        if proposed_id == active:
-            active_complete = is_user_story_row_complete(by_id[proposed_id])
 
     active = resolve_active_user_story_id(cases, active)
     return cases, active
