@@ -147,9 +147,10 @@ export type HulyProposalPriority = "urgent" | "high" | "medium" | "low" | "none"
 
 export interface HulyProposedTask {
     key: string;
-    role: "FE" | "BE" | "QA" | "BA" | "Design" | "Other";
     title: string;
     outcome: string;
+    current_state: string;
+    solution: string;
     scope_in: string[];
     scope_out: string[];
     acceptance_criteria: string[];
@@ -172,8 +173,9 @@ export interface HulyTaskProposal {
 
 export interface HulyTaskProposalResponse {
     proposal: HulyTaskProposal;
-    proposal_mode?: "agent" | "fallback";
+    proposal_mode?: "agent" | "reviewed" | "unreviewed" | "fallback";
     proposal_notice?: string;
+    proposal_reviewed?: boolean;
     sources: Record<string, string>;
     source_meta: {
         ba_available: boolean;

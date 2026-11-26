@@ -25,7 +25,14 @@ from ..core.errors import AppError, not_found
 from ..core.llm import STRUCTURED_PARSER_VERSION
 from ..designsystem.service import design_context
 from ..huly import client as huly_client
-from ..huly.proposal import HulyTaskProposal, TaskPriority, TaskRole, fallback_proposal, proposal_prompt, validate_proposal_links
+from ..huly.proposal import (
+    HulyTaskProposal,
+    TaskPriority,
+    fallback_proposal,
+    proposal_prompt,
+    proposal_review_prompt,
+    validate_proposal_links,
+)
 from ..models import ExactAsset, Platform, ReviewCreate, RunCreate, RunView, SessionCreate, SessionView
 from ..render.assets import inline_assets
 from .access import DESIGNER_ROLE, current_user_id, current_username
@@ -47,7 +54,7 @@ class HulyIssueCreate(BaseModel):
     project_id: str = Field(min_length=1, max_length=160)
     title: str = Field(min_length=1, max_length=240)
     objective: str = Field(min_length=1, max_length=8_000)
-    current_state: str = Field(min_length=1, max_length=8_000)
+    current_state: str = Field(default="", max_length=8_000)
     solution: str = Field(min_length=1, max_length=12_000)
     acceptance_criteria: str = Field(min_length=1, max_length=12_000)
     priority: str = Field(default="none", pattern=r"^(urgent|high|medium|low|none)$")
@@ -58,9 +65,10 @@ class HulyIssueCreate(BaseModel):
 
 class HulyBulkTaskCreate(BaseModel):
     key: str = Field(min_length=1, max_length=80)
-    role: TaskRole
     title: str = Field(min_length=1, max_length=240)
     outcome: str = Field(min_length=1, max_length=2_000)
+    current_state: str = Field(default="", max_length=2_000)
+    solution: str = Field(min_length=1, max_length=4_000)
     scope_in: list[str] = Field(min_length=1, max_length=12)
     scope_out: list[str] = Field(default_factory=list, max_length=12)
     acceptance_criteria: list[str] = Field(min_length=1, max_length=16)
@@ -236,16 +244,9 @@ def _read_ba_package(session: Any) -> tuple[dict[str, Any] | None, dict[str, Any
 def _task_draft_from_sources(session: Any, run: Any, screens: list[Any], package: dict[str, Any] | None, artifact: dict[str, Any] | None) -> dict[str, Any]:
     template_path = Path(__file__).resolve().parents[1] / "huly" / "task_draft_templates.json"
     templates = json.loads(template_path.read_text(encoding="utf-8"))
-    fallback = templates["fallbacks"]
 
     def render(template: str, values: dict[str, Any]) -> str:
         return Template(template).safe_substitute(values).strip()
-
-    def fallback_text(key: str) -> str:
-        return str(fallback.get(key, ""))
-
-    def join_or(values: list[str], key: str) -> str:
-        return ", ".join(value for value in values if value) or fallback_text(key)
 
     payload = package.get("payload", {}) if isinstance(package, dict) else {}
     payload = payload if isinstance(payload, dict) else {}
@@ -254,7 +255,6 @@ def _task_draft_from_sources(session: Any, run: Any, screens: list[Any], package
     business_rules = [item for item in artifacts.get("business_rules", []) if isinstance(item, dict)]
     use_cases = [item for item in artifacts.get("use_cases", []) if isinstance(item, dict)]
     workflow = artifacts.get("bpmn_reference", {}) if isinstance(artifacts.get("bpmn_reference"), dict) else {}
-    touchpoints = [item for item in artifacts.get("ui_touchpoints", []) if isinstance(item, dict)]
     exceptions = [item for item in workflow.get("exceptions", []) if isinstance(item, dict)]
     feature_id = str((package or {}).get("feature_id") or getattr(session, "source_ref", "") or "").strip()
     feature_title = str(payload.get("feature_title") or session.title).strip()
@@ -272,114 +272,59 @@ def _task_draft_from_sources(session: Any, run: Any, screens: list[Any], package
         suffix = render(templates["title_suffix"], title_values)
         title = prefix + feature_title[:max(0, title_limit - len(prefix) - len(suffix))].rstrip() + suffix
 
-    objective_values = {
-        "goal": goal or fallback_text("goal"),
-        "screen_scope": render(templates["screen_scope"], {"screen_count": len(screens), "platform": platform}),
-    }
-    objective = "\n".join(render(item, objective_values) for item in templates["objective"])
+    objective = goal
+    current_state = str(feature.get("current_state") or "").strip()
 
-    completed = fallback_text("completed")
-    if package:
-        completed = render(templates["source_summary"], {
-            "rule_count": len(business_rules),
-            "step_count": len(workflow.get("steps", [])),
-            "exception_count": len(exceptions),
-            "use_case_count": len(use_cases),
-        })
-    gap = render(templates["implementation_gap"], {
-        "screen_count": len(screens),
-        "screen_names": ", ".join(screen.name for screen in screens) or fallback_text("gap"),
-    }) if screens else fallback_text("gap")
-    current_state = "\n".join(
-        render(item, {"completed": completed, "gap": gap})
-        for item in templates["current_state"]
-    )
-
-    use_case_rules = {
-        str(case.get("id")): [str(value) for value in case.get("rule_ids", []) if value]
-        for case in use_cases
-    }
-    rule_descriptions = {
-        str(item.get("id")): str(item.get("statement") or "").strip()
-        for item in business_rules
-        if item.get("id") and item.get("statement")
-    }
-    touchpoint_map = {str(item.get("id", "")).casefold(): item for item in touchpoints if item.get("id")}
     run_spec = run.specification if isinstance(run.specification, dict) else {}
     spec_screens = run_spec.get("screens", []) if isinstance(run_spec.get("screens"), list) else []
     specs_by_id = {str(item.get("id")): item for item in spec_screens if isinstance(item, dict)}
     screen_details: list[str] = []
     for screen in screens:
         spec = specs_by_id.get(str(screen.id), {})
-        source_ids = [str(value) for value in spec.get("source_ui_ids", []) if value]
-        related_use_cases: set[str] = set()
-        for source_id in source_ids:
-            touchpoint = touchpoint_map.get(source_id.casefold())
-            if touchpoint:
-                related_use_cases.update(str(value) for value in touchpoint.get("related_uc_ids", []) if value)
-        mapped_rules = sorted({
-            rule_descriptions[rule_id]
-            for use_case_id in related_use_cases
-            for rule_id in use_case_rules.get(use_case_id, [])
-            if rule_descriptions.get(rule_id)
-        })
-        screen_details.append(render(templates["screen_detail"], {
-            "name": screen.name,
-            "sections": ", ".join(str(value) for value in spec.get("sections", []) if value) or fallback_text("unknown"),
-            "states": ", ".join(str(value) for value in spec.get("states", []) if value) or fallback_text("unknown"),
-            "rules": "; ".join(mapped_rules) or fallback_text("unknown"),
-        }))
+        detail_parts = []
+        if spec.get("purpose"):
+            detail_parts.append(str(spec["purpose"]).strip())
+        if spec.get("sections"):
+            detail_parts.append("Khu vực hiển thị: " + ", ".join(str(value) for value in spec["sections"] if value))
+        if spec.get("states"):
+            detail_parts.append("Trạng thái: " + ", ".join(str(value) for value in spec["states"] if value))
+        if spec.get("navigation"):
+            detail_parts.append("Điều hướng: " + ", ".join(str(value) for value in spec["navigation"] if value))
+        if spec.get("must_show"):
+            detail_parts.append("Nội dung bắt buộc: " + ", ".join(str(value) for value in spec["must_show"] if value))
+        if detail_parts:
+            screen_details.append(f"{screen.name}: " + "; ".join(detail_parts))
 
-    solution_values = {
-        "screen_count": len(screens),
-        "screen_details": "\n".join(screen_details) or fallback_text("gap"),
-        "business_rules": render(templates["business_rule_detail"], {
-            "items": "; ".join(str(item.get("statement") or "").strip() for item in business_rules if str(item.get("statement") or "").strip()) or fallback_text("business_rules")
-        }),
-        "exception_flows": "\n".join(
-            render(templates["exception_detail"], {
-                "condition": str(item.get("condition") or fallback_text("unknown")),
-                "handling": str(item.get("handling") or fallback_text("unknown")),
-                "outcome": render(templates["exception_outcome_suffix"], {"value": item.get("outcome")}) if item.get("outcome") else "",
-            }) for item in exceptions
-        ) or fallback_text("exception_flows"),
-        "scope_out": render(templates["scope_out_line"], {"items": join_or(
-            [str(item) for item in feature.get("scope_out", []) if item] if isinstance(feature.get("scope_out"), list) else [],
-            "scope_out",
-        )}),
-    }
-    solution = "\n".join(render(item, solution_values) for item in templates["solution"])
+    solution_parts = screen_details[:]
+    solution_parts.extend(
+        f"{str(item.get('id')).strip() + ': ' if item.get('id') else ''}{str(item.get('statement') or '').strip()}"
+        for item in business_rules if str(item.get("statement") or "").strip()
+    )
+    solution_parts.extend(
+        "; ".join(part for part in (
+            f"Điều kiện: {str(item.get('condition') or '').strip()}" if str(item.get("condition") or "").strip() else "",
+            f"Xử lý: {str(item.get('handling') or '').strip()}" if str(item.get("handling") or "").strip() else "",
+            f"Kết quả mong đợi: {str(item.get('outcome') or '').strip()}" if str(item.get("outcome") or "").strip() else "",
+        ) if part)
+        for item in exceptions
+        if any(str(item.get(key) or "").strip() for key in ("condition", "handling", "outcome"))
+    )
+    solution = "\n".join(solution_parts)
 
     criteria: list[str] = []
     for case in use_cases:
         for item in case.get("acceptance_criteria", []) if isinstance(case.get("acceptance_criteria"), list) else []:
-            if isinstance(item, dict):
-                criteria.append(render(templates["use_case_acceptance"], {
-                    "given": item.get("given") or fallback_text("unknown"),
-                    "when": item.get("when") or fallback_text("unknown"),
-                    "then": item.get("then") or fallback_text("unknown"),
-                }))
-    use_case_criteria = "\n".join(criteria) or fallback_text("use_case_criteria")
-    widths = ", ".join(str(screen.width) for screen in screens if str(screen.platform).casefold() == "mobile")
-    if not widths:
-        widths = fallback_text("responsive_width")
-    viewport_criteria = render(templates["viewport_criteria"], {"widths": widths})
+            if isinstance(item, dict) and all(str(item.get(key) or "").strip() for key in ("given", "when", "then")):
+                criteria.append(f"Với {item['given']}; khi {item['when']}; thì {item['then']}.")
     exception_criteria = "\n".join(
-        render(templates["exception_acceptance"], {
-            "condition": str(item.get("condition") or fallback_text("unknown")),
-            "handling": str(item.get("handling") or fallback_text("unknown")),
-            "outcome": render(templates["exception_acceptance_outcome_suffix"], {"value": item.get("outcome")}) if item.get("outcome") else "",
-        }) for item in exceptions
-    ) or fallback_text("exception_criteria")
-    criteria_values = {
-        "acceptance_summary": templates.get("acceptance_summary", ""),
-        "use_case_criteria": use_case_criteria,
-        "viewport_criteria": viewport_criteria,
-        "exception_criteria": exception_criteria,
-        "scope_criteria": fallback_text("scope_criteria"),
-        "traceability_criteria": fallback_text("traceability_criteria"),
-    }
-    acceptance_criteria = "\n".join(render(item, criteria_values) for item in templates["acceptance_criteria"])
+        "; ".join(part for part in (
+            f"Khi {str(item.get('condition') or '').strip()}" if str(item.get("condition") or "").strip() else "",
+            f"hệ thống {str(item.get('handling') or '').strip()}" if str(item.get("handling") or "").strip() else "",
+            f"kết quả mong đợi là {str(item.get('outcome') or '').strip()}" if str(item.get("outcome") or "").strip() else "",
+        ) if part) + "."
+        for item in exceptions if str(item.get("condition") or "").strip() and str(item.get("handling") or "").strip()
+    )
+    acceptance_criteria = "\n".join(item for item in ("\n".join(criteria), exception_criteria) if item)
 
     missing = []
     if not package:
@@ -395,6 +340,7 @@ def _task_draft_from_sources(session: Any, run: Any, screens: list[Any], package
 
     return {
         "title": title,
+        "goal": goal,
         "objective": objective,
         "current_state": current_state,
         "solution": solution,
@@ -654,18 +600,34 @@ async def propose_huly_tasks(request: Request, session_id: UUID, body: HulyPropo
     )
     proposal_mode = "agent"
     proposal_notice = ""
+    proposal_reviewed = False
     try:
-        proposal = await request.app.state.llm.structured(prompt=prompt, schema=HulyTaskProposal)
-        validate_proposal_links(proposal, source_ids)
+        candidate = await request.app.state.llm.structured(prompt=prompt, schema=HulyTaskProposal)
+        validate_proposal_links(candidate, source_ids)
     except (ValueError, AppError):
         proposal = fallback_proposal(title=session.title, draft=fallback_draft, screens=screens, source_ids=source_ids)
         proposal_mode = "fallback"
         proposal_notice = "AI chưa phân tích được lúc này. Đây là bản nháp một task lấy từ thiết kế đã duyệt; hãy rà lại trước khi tạo."
+    else:
+        proposal = candidate
+        try:
+            reviewed = await request.app.state.llm.structured(
+                prompt=proposal_review_prompt(original_prompt=prompt, proposal=candidate),
+                schema=HulyTaskProposal,
+            )
+            validate_proposal_links(reviewed, source_ids)
+            proposal = reviewed
+            proposal_mode = "reviewed"
+            proposal_reviewed = True
+        except (ValueError, AppError):
+            proposal_mode = "unreviewed"
+            proposal_notice = "AI đã tạo đề xuất nhưng chưa hoàn tất bước rà cách chia task; hãy kiểm tra kỹ luồng nghiệp vụ và phạm vi trước khi tạo."
 
     return {
         "proposal": proposal.model_dump(),
         "proposal_mode": proposal_mode,
         "proposal_notice": proposal_notice,
+        "proposal_reviewed": proposal_reviewed,
         "sources": source_catalog,
         "source_meta": {
             "ba_available": package is not None,
@@ -698,16 +660,16 @@ async def create_huly_issue(request: Request, session_id: UUID, body: HulyIssueC
     projects = await huly_client.list_projects(request.app.state.settings)
     if not any(body.project_id in {project["id"], project["identifier"], project["huly_id"]} for project in projects):
         raise AppError("HULY_PROJECT_INVALID", "Huly project is unavailable", "Select a project from the current Huly workspace.", 422)
-    description = "\n\n".join(
-        [
-            f"## Mục tiêu\n{body.objective.strip()}",
-            f"## Hiện trạng\n{body.current_state.strip()}",
-            f"## Giải pháp\n{body.solution.strip()}",
-            f"## Tiêu chí chấp nhận (AC)\n{body.acceptance_criteria.strip()}",
-            "## Màn hình thiết kế đã duyệt\n" + "\n".join(f"- {screen.name} ({screen.platform})" for screen in screens),
-            f"Nguồn: Agent Designer · Session `{session_id}` · Run `{run.id}`",
-        ]
-    )
+    sections = [f"## Mục tiêu\n{body.objective.strip()}"]
+    if body.current_state.strip():
+        sections.append(f"## Hiện trạng\n{body.current_state.strip()}")
+    sections.extend([
+        f"## Giải pháp\n{body.solution.strip()}",
+        f"## Tiêu chí nghiệm thu\n{body.acceptance_criteria.strip()}",
+        "## Thiết kế đã duyệt\n" + "\n".join(f"- {screen.name} ({screen.platform})" for screen in screens),
+        f"Nguồn tạo: Agent Designer · Session `{session_id}` · Run `{run.id}`",
+    ])
+    description = "\n\n".join(sections)
     huly_project = next(project for project in projects if body.project_id in {project["id"], project["identifier"], project["huly_id"]})
     if body.epic_id:
         epics = await huly_client.list_epics(request.app.state.settings, project=huly_project["identifier"])
@@ -795,6 +757,23 @@ async def create_huly_issues_batch(request: Request, session_id: UUID, body: Hul
         visit(key)
 
     for task in body.tasks:
+        if (
+            not task.title.strip()
+            or not task.outcome.strip()
+            or not task.solution.strip()
+            or not task.scope_in
+            or any(not item.strip() for item in task.scope_in)
+            or any(not item.strip() for item in task.scope_out)
+            or not task.acceptance_criteria
+            or any(not item.strip() for item in task.acceptance_criteria)
+            or (task.priority != "none" and not task.priority_rationale.strip())
+        ):
+            raise AppError(
+                "HULY_TASK_CONTENT_INCOMPLETE",
+                "Task content is incomplete",
+                "Complete the task outcome, solution, scope, and acceptance criteria; add an evidence-based rationale whenever a priority is selected.",
+                422,
+            )
         try:
             date.fromisoformat(task.due_date)
         except ValueError as error:
@@ -864,22 +843,27 @@ async def create_huly_issues_batch(request: Request, session_id: UUID, body: Hul
             attachments.append({"filename": tokens_path.name, "content_type": "application/json", "file_path": str(tokens_path), "description": "Approved design tokens"})
 
         for task in body.tasks:
-            dependency_titles = [next(item.title for item in body.tasks if item.key == key) for key in task.dependency_keys]
-            clarification_text = "\n".join(f"- {note}" for note in task.clarification_notes) or "- No unresolved BA/PO questions."
             source_lines = [f"- {title}" for title in task.source_titles] or [f"- {ref}" for ref in task.source_refs]
-            description = "\n\n".join([
-                "## Nguồn\n" + "\n".join(source_lines),
-                f"## Mục tiêu\n{task.outcome}",
-                "## Hiện trạng\nThiết kế đã được duyệt; phần triển khai của task này chưa được xác nhận hoàn tất.",
-                "## Giải pháp và phạm vi\n### Bao gồm\n" + "\n".join(f"- {item}" for item in task.scope_in) + "\n\n### Ngoài phạm vi\n" + ("\n".join(f"- {item}" for item in task.scope_out) or "- Chưa nêu."),
-                f"## Cần chốt với BA/PO\n{clarification_text}",
-                "## Tiêu chí nghiệm thu\n| # | Tình huống kiểm thử | Hoàn tất |\n|---:|---|:---:|\n" + "\n".join(f"| {index} | {item.replace('|', '／')} | [ ] |" for index, item in enumerate(task.acceptance_criteria, start=1)),
-                f"## Lý do ưu tiên\n{task.priority_rationale or 'Được chọn khi rà soát task.'}",
-                "## Task phụ thuộc\n" + ("\n".join(f"- {item}" for item in dependency_titles) or "- Không có."),
-                "## Issue liên quan\n" + ("\n".join(f"- {identifier}" for identifier in task.related_issue_ids) or "- Không có."),
-                "## Màn hình đã duyệt\n" + "\n".join(f"- {screen.name} ({screen.platform})" for screen in screens),
-                f"Source: Agent Designer · Session `{session_id}` · Run `{run.id}`",
+            sections = [
+                "**Tài liệu tham chiếu:**\n" + "\n".join(source_lines),
+                "## 🎯 Mục tiêu\n" + task.outcome.strip(),
+            ]
+            if task.current_state.strip():
+                sections.append("## 📌 Hiện trạng\n" + task.current_state.strip())
+            solution_parts = ["## 🛠 Giải pháp\n" + task.solution.strip()]
+            if task.scope_in:
+                solution_parts.append("**Phạm vi triển khai**\n" + "\n".join(f"- {item}" for item in task.scope_in))
+            if task.scope_out:
+                solution_parts.append("**Ngoài phạm vi**\n" + "\n".join(f"- {item}" for item in task.scope_out))
+            sections.append("\n\n".join(solution_parts))
+            if task.clarification_notes:
+                sections.append("## ⚠️ Cần chốt trước khi bắt đầu\n" + "\n".join(f"- {item}" for item in task.clarification_notes))
+            sections.extend([
+                "## 📋 Tiêu chí chấp nhận\n| # | Tình huống kiểm thử |\n|---:|---|\n" + "\n".join(f"| {index} | {item.replace('|', '／')} |" for index, item in enumerate(task.acceptance_criteria, start=1)),
             ])
+            if task.priority_rationale.strip():
+                sections.append("> **Lý do ưu tiên:** " + task.priority_rationale.strip())
+            description = "\n\n".join(sections)
             try:
                 result = await huly_client.create_issue(
                     settings, project=huly_project["identifier"], title=task.title,

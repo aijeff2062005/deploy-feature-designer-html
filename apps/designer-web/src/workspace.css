@@ -4130,6 +4130,7 @@
 .huly-proposal-heading > div { display: flex; align-items: center; gap: 8px; color: var(--violet); }
 .huly-proposal-heading strong { color: var(--text-primary); font-size: 15px; }
 .huly-proposal-heading > span { display: flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: 11px; }
+.huly-proposal-review-badge { padding: 3px 7px; border: 1px solid color-mix(in srgb, var(--success, #10b981) 30%, var(--border-strong)); border-radius: 999px; background: color-mix(in srgb, var(--success, #10b981) 9%, var(--bg-surface)); color: var(--success, #10b981); font-size: 10px; font-weight: 650; }
 .huly-proposal-heading i, .huly-proposal-meta i { width: 3px; height: 3px; border-radius: 50%; background: currentColor; }
 .huly-proposal-questions { display: grid; gap: 8px; padding: 12px; border: 1px solid color-mix(in srgb, var(--warning, #f0b45b) 48%, var(--border-strong)); border-radius: 11px; background: color-mix(in srgb, var(--warning, #f0b45b) 7%, var(--bg-surface)); }
 .huly-proposal-questions > strong { color: var(--warning, #f0b45b); font-size: 12px; }

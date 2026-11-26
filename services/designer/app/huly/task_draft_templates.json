@@ -7,46 +7,5 @@
     "mobile": "Mobile UI",
     "desktop": "Desktop UI",
     "responsive": "Responsive UI"
-  },
-  "screen_scope": "${screen_count} màn hình ${platform} theo thiết kế đã duyệt.",
-  "implementation_gap": "${screen_count} màn hình UI (${screen_names}) chưa được triển khai và QA trên ứng dụng thực tế.",
-  "source_summary": "Tài liệu nghiệp vụ đã liên kết gồm ${rule_count} quy tắc, ${step_count} bước trong quy trình, ${exception_count} tình huống cần xử lý và ${use_case_count} luồng sử dụng.",
-  "objective": [
-    "- **Giá trị mang lại:** ${goal}",
-    "- **Phạm vi đầu ra:** ${screen_scope}"
-  ],
-  "current_state": [
-    "- **Đã hoàn thành:** ${completed}",
-    "- **Cần thực hiện:** ${gap}"
-  ],
-  "solution": [
-    "Triển khai ${screen_count} màn hình theo UI spec.md và PNG đính kèm. Tuân thủ quy tắc nghiệp vụ và luồng ngoại lệ trong BA package; chi tiết từng màn hình xem trong tài liệu bàn giao."
-  ],
-  "screen_detail": "- **${name}** — Thành phần: ${sections}; trạng thái cần xử lý: ${states}",
-  "exception_detail": "- Khi ${condition}, hệ thống cần ${handling}${outcome}",
-  "exception_outcome_suffix": "; kết quả mong đợi: ${value}",
-  "scope_out_line": "- **Ngoài phạm vi:** ${items}",
-  "business_rule_detail": "- **Quy tắc nghiệp vụ cần tuân thủ:** ${items}",
-  "use_case_acceptance": "- [ ] Given ${given}; When ${when}; Then ${then}.",
-  "exception_acceptance": "- [ ] Khi ${condition}, hệ thống ${handling}${outcome}.",
-  "exception_acceptance_outcome_suffix": "; kết quả mong đợi: ${value}",
-  "viewport_criteria": "- [ ] Giao diện hiển thị đúng trên viewport đã duyệt (${widths}); không tràn ngang.",
-  "acceptance_criteria": [
-    "${acceptance_summary}"
-  ],
-  "fallbacks": {
-    "goal": "Chưa có mục tiêu trong nguồn BA; cần BA/PO bổ sung.",
-    "unknown": "Chưa có dữ liệu trong nguồn BA.",
-    "responsive_width": "responsive theo UI spec",
-    "completed": "Tài liệu nghiệp vụ đã được liên kết.",
-    "gap": "Triển khai và QA các màn hình UI đã được duyệt.",
-    "business_rules": "Chưa có quy tắc nghiệp vụ trong tài liệu nguồn.",
-    "exception_flows": "- **Tình huống cần xử lý:** Tài liệu nghiệp vụ chưa mô tả thêm tình huống ngoại lệ.",
-    "scope_out": "Nguồn BA chưa khai báo.",
-    "use_case_criteria": "- [ ] Kiểm tra luồng và tiêu chí nghiệm thu theo UI spec đã duyệt.",
-    "exception_criteria": "- [ ] Xác nhận các tình huống lỗi và cách xử lý với BA/PO trước khi nghiệm thu.",
-    "scope_criteria": "- [ ] Không triển khai ngoài phạm vi đã được BA/PO xác nhận.",
-    "traceability_criteria": "- [ ] Đối chiếu kết quả với tài liệu BA và thiết kế đã được duyệt."
-  },
-  "acceptance_summary": "- [ ] Các màn hình khớp UI spec và PNG đã duyệt.\n- [ ] Luồng chính và trạng thái ngoại lệ đáp ứng BA package.\n- [ ] Giao diện đúng viewport/nền tảng trong UI spec, không tràn hoặc cắt nội dung."
+  }
 }
