@@ -38,7 +38,7 @@ Nhiệm vụ Duy Nhất của bạn là đọc tin nhắn người dùng kết h
 4. **CHỈ TRÍCH XUẤT KHI CÓ TUYÊN BỐ / KHẲNG ĐỊNH / LỰA CHỌN RÕ RÀNG**:
    - `goal`: Chỉ điền khi người dùng đưa ra câu mục tiêu/lý do nghiệp vụ cụ thể. Nếu là câu hỏi hoặc không rõ ràng → trả về `""`.
    - `actors`: Chỉ điền khi người dùng tuyên bố/chốt danh sách tên tác nhân. Nếu là câu hỏi xin gợi ý actors → trả về `[]`.
-   - `scope_in`: Chỉ điền khi người dùng tuyên bố/chốt danh sách chức năng thuộc phạm vi. Nếu là câu hỏi → trả về `[]`.
+   - `scope_in`: Chỉ điền khi người dùng tuyên bố/chốt danh sách chức năng thuộc phạm vi. Nếu là câu hỏi → trả về `[]`. **BẮT BUỘC viết ngắn gọn dạng tóm tắt (1 câu ~15–30 từ cho mỗi màn hình hoặc capability)**, ví dụ: `"Màn hình 1 – Đăng nhập (dang-nhap-aeropass): Cho phép hội viên đăng nhập bằng Email/SĐT và mật khẩu, điều hướng sang đăng ký hoặc quên mật khẩu."`. **TUYỆT ĐỐI KHÔNG** chép chi tiết layout/UI (Top Bar, Placeholder, kích thước px, danh sách Inline Error, Sticky CTA...) vào `scope_in`; toàn bộ chi tiết đó thuộc về `screen_specs`.
    - `scope_out`: Chỉ điền khi người dùng tuyên bố/chốt danh sách chức năng ngoài phạm vi. Nếu là câu hỏi → trả về `[]`.
    - `screen_specs`: Khi User cung cấp hoặc sửa đặc tả màn hình, trích xuất đầy đủ theo đúng thứ tự; giữ nguyên slug/ID, kích thước, nội dung, CTA/điều hướng, trạng thái/lỗi, quy tắc và dữ liệu bàn giao đã nêu. Không rút đặc tả thành tên màn hình nếu User đã cung cấp chi tiết.
 
@@ -47,6 +47,7 @@ Nhiệm vụ Duy Nhất của bạn là đọc tin nhắn người dùng kết h
 ## FEATURE CONTINUITY EXTRACTION
 - Extract `continuity` from explicit user statements, the described business flow, or confirmed approved-Wiki data. Do not require the user to use the words "feature tiếp nối", provide a feature ID, or provide an End State ID.
 - Treat an explicit terminal route to a named out-of-scope screen or role-specific destination as an outgoing handoff. Set `has_successor` to `true` and record the destination using its human-readable screen/feature title, even when no feature record or ID exists yet. Split branches when their conditions or destinations differ.
+- **STRICTLY EXCLUDE INTERNAL NAVIGATION**: Record ONLY terminal branches that leave this feature to a distinct downstream feature or out-of-scope destination. NEVER record internal routes that navigate or redirect to another screen inside THIS feature (any screen present in `scope_in` or `screen_specs`, e.g., redirecting back to the Login screen after registration, password reset, or logout) as an outgoing `handoffs` entry.
 - Preserve `has_successor` as unset when no outgoing route or standalone confirmation is present; set it to `false` only when the user explicitly confirms this feature is standalone or has no successor. Do not convert missing destination IDs into `false`.
 - Preserve `has_predecessor` as unset until the user confirms whether this feature continues approved prior work; never infer it from feature order or title.
 - When `has_successor` is true, extract one `handoffs` record for every distinct terminal branch supported by the described flow, with its branch condition, human-readable destination title, resulting state and any explicitly assigned deferred scope. Feature IDs and workflow End State IDs are optional references; leave them unset when unavailable and never ask the user to invent or supply them just to record a clear handoff. Keep deferred scope in Continuity only; do not copy or append it to `scope_out` unless the user explicitly includes it in the Scope Out list. Preserve the user's Scope Out list as its own complete list; never merge distinct handoff outcomes into it.
@@ -57,7 +58,7 @@ Nhiệm vụ Duy Nhất của bạn là đọc tin nhắn người dùng kết h
 - A matching Scope Out item plus an explicit route to the named out-of-scope destination is sufficient evidence of deferred scope; do not require the user to separately say that the destination owns that work. Match only the items that clearly belong to that destination and branch.
 - Do not copy all Scope Out items. Excluded work without explicit downstream ownership, hypothetical suggestions, session fields and navigation signals are not deferred business scope. A destination alone is not evidence of scope ownership.
 - Multiple branches may share deferred scope only when the source statement applies to their shared destination without a branch restriction. Respect branch-specific restrictions and conflicting or retracted statements; leave genuinely ambiguous scope unresolved.
-- When updating handoffs, return the COMPLETE handoffs list, preserving every existing branch and all its identifiers, conditions, destination and exit state. Preserve existing confirmed scope unless the user corrects it. Do not append duplicate branches or change Scope Out during reconciliation.
+- When updating handoffs, return the COMPLETE handoffs list, preserving every existing valid outgoing branch and all its identifiers, conditions, destination and exit state — EXCEPT any previously mis-extracted internal-route branches (whose destination is a screen inside THIS feature), which MUST be dropped. Preserve existing confirmed scope unless the user corrects it. Do not append duplicate branches or change Scope Out during reconciliation.
 - If no evidence-backed correction is possible, leave `continuity` unset. Never invent scope merely to satisfy the gate.
 
 ## QUY TẮC TRÍCH XUẤT VÀ HỢP NHẤT DỮ LIỆU (CRITICAL EXTRACTION RULES)
@@ -69,7 +70,7 @@ Nhiệm vụ Duy Nhất của bạn là đọc tin nhắn người dùng kết h
 ### 2. QUY TẮC CHO TRƯỜNG ĐƯỢC CHỈNH SỬA / THAY ĐỔI:
 - Khi người dùng **tuyên bố thay đổi, sửa, thêm mới, hoặc xóa** thông tin của một trường (ví dụ: `actors`, `goal`, `scope_in`, `scope_out`):
   - **Trường Chuỗi (`goal`)**: Trả về câu văn mục tiêu MỚI hoàn chỉnh.
-  - **Trường Danh sách (`actors`, `scope_in`, `scope_out`)**: Dựa trên Current Data, áp dụng thay đổi của User rồi trả về **TOÀN BỘ DANH SÁCH MỚI**. Dùng `[]` khi User muốn xóa hết; dùng `null` hoặc bỏ trường khi User không yêu cầu thay đổi.
+  - **Trường Danh sách (`actors`, `scope_in`, `scope_out`)**: Dựa trên Current Data, áp dụng thay đổi của User rồi trả về **TOÀN BỘ DANH SÁCH MỚI**. Dùng `[]` khi User muốn xóa hết; dùng `null` hoặc bỏ trường khi User không yêu cầu thay đổi. Riêng `scope_in`, mỗi phần tử chỉ là **1 câu tóm tắt ngắn gọn cho từng màn hình/chức năng**, không nhồi chi tiết UI của `screen_specs` vào `scope_in`.
   - **`screen_specs`**: Nếu User cung cấp/sửa yêu cầu theo màn hình, trả về danh sách đặc tả đầy đủ theo thứ tự mới nhất, giữ lại chi tiết cũ chưa bị thay thế. Mỗi mục phải có `screen_id`, `name`, `sequence`; đặt các khối giao diện vào `sections`, CTA/đích vào `actions`, lỗi/trạng thái vào `states`, điều kiện nghiệp vụ vào `rules`, dữ liệu vào/ra vào `data_contract`, giới hạn khác vào `notes`. Không tự suy đoán chi tiết còn thiếu.
 
 ### 3. QUY TẮC CHO TRƯỜNG KHÔNG ĐƯỢC NHẮC ĐẾN:

@@ -82,7 +82,8 @@ class FeatureDefinitionData(BaseModel):
     )
     scope_in: list[str] | None = Field(
         None,
-        description="Capabilities thuộc phạm vi feature. "
+        description="Danh sách tóm tắt ngắn gọn các màn hình/chức năng thuộc phạm vi (1 câu ~15–30 từ cho mỗi màn hình hoặc capability). "
+        "KHÔNG chép chi tiết UI/layout (Top Bar, Placeholder, px, danh sách Inline Error, CTA) vào đây — phần đó thuộc screen_specs. "
         "Nếu có thay đổi, trả về toàn bộ danh sách mới; null nếu không thay đổi; [] nếu người dùng xóa toàn bộ.",
     )
     scope_out: list[str] | None = Field(

@@ -37,7 +37,7 @@ Trong mỗi lượt, bạn sẽ nhận được các khối thông tin được 
 Dữ liệu Feature Definition hiện tại đã được hợp nhất, bao gồm:
 - `goal`: Mục tiêu và giá trị nghiệp vụ
 - `actors`: Danh sách tác nhân (user roles + external systems)
-- `scope_in`: Các tính năng nằm TRONG phạm vi
+- `scope_in`: Tóm tắt ngắn gọn các màn hình/chức năng nằm TRONG phạm vi (1 câu tóm tắt cho mỗi màn hình; chi tiết UI/layout nằm ở `screen_specs`)
 - `scope_out`: Các tính năng nằm NGOÀI phạm vi
 - `screen_specs`: Đặc tả đầy đủ cho từng màn hình theo đúng thứ tự người dùng cung cấp
 - `continuity`: Điểm bàn giao từ Feature này sang Feature tiếp theo, nếu có
