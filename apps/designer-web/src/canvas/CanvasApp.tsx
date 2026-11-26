@@ -350,6 +350,9 @@ function StateFrame({
         return () => window.removeEventListener("message", onMsg);
     }, []);
 
+    const frameH = defaultH;
+    const contentH = Math.max(defaultH, h);
+
     return (
         <div className={`canvas-multi-frame ${active ? "active" : ""}`} data-screen-id={screenId} onClick={onClick} role="button" tabIndex={0}
             aria-label={`Mở màn hình ${screenName}`} onKeyDown={(event) => {
@@ -359,10 +362,12 @@ function StateFrame({
             <span className="canvas-multi-index">{index}</span>
                 <strong>{screenName}</strong>
             </div>
-            <div className="canvas-multi-viewport" style={{ width: w * scale, height: h * scale }}>
-                <iframe ref={ref} title={screenName} sandbox="allow-scripts allow-forms"
-                    srcDoc={noScrollDoc(doc)} onLoad={handleLoad}
-                    style={{ width: w, height: h, zoom: scale, pointerEvents: "none", border: 0 }} />
+            <div className="canvas-multi-viewport" style={{ width: w * scale, height: frameH * scale }}>
+                <div className="canvas-multi-viewport-inner" style={{ width: w * scale, height: contentH * scale }}>
+                    <iframe ref={ref} title={screenName} sandbox="allow-scripts allow-forms"
+                        srcDoc={noScrollDoc(doc)} onLoad={handleLoad}
+                        style={{ width: w, height: contentH, transform: `scale(${scale})`, transformOrigin: "top left", pointerEvents: "none", border: 0 }} />
+                </div>
             </div>
         </div>
     );
@@ -379,10 +384,15 @@ function MultiView({ screens, selectedId, onSelect, layout = "flow" }: { screens
     const containerRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
+        let active = true;
         screens.forEach((s) => {
-            if (docs[s.id]) return;
-            api.screenDocument(SESSION, s.id).then((d) => setDocs((prev) => ({ ...prev, [s.id]: d }))).catch(() => undefined);
+            const key = `${s.id}:${s.version}`;
+            if (docs[key]) return;
+            api.screenDocument(SESSION, s.id).then((d) => {
+                if (active) setDocs((prev) => ({ ...prev, [key]: d }));
+            }).catch(() => undefined);
         });
+        return () => { active = false; };
     }, [screens]);
 
     // Ctrl+wheel zoom
@@ -442,7 +452,7 @@ function MultiView({ screens, selectedId, onSelect, layout = "flow" }: { screens
             <div className="canvas-flow-scroll">
             <div className="canvas-multi">
                 {orderedScreens.map((s, index) => {
-                    const doc = docs[s.id] ?? null;
+                    const doc = docs[`${s.id}:${s.version}`] ?? null;
                     const w = s.width ?? (s.platform === "mobile" ? 390 : 1440);
                     const h = s.platform === "mobile" ? 844 : s.platform === "tablet" ? 1024 : 900;
                     return <div className="canvas-flow-step" key={s.id}>

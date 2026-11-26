@@ -84,7 +84,7 @@ function previewDocument(option: StylePreviewOption): string | undefined {
     return `<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${policy}"><style>${css}</style></head><body>${option.html}</body></html>`;
 }
 
-function LiveStylePreview({ option, className = "", zoom = 1 }: { option: StylePreviewOption; className?: string; zoom?: number }) {
+function LiveStylePreview({ option, className = "", zoom = 1, scrollable = false }: { option: StylePreviewOption; className?: string; zoom?: number; scrollable?: boolean }) {
     const srcDoc = previewDocument(option);
     const stageRef = useRef<HTMLDivElement>(null);
     const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
@@ -97,16 +97,20 @@ function LiveStylePreview({ option, className = "", zoom = 1 }: { option: StyleP
     }, []);
     const width = Math.max(1, Number(option.preview_width) || 390);
     const height = Math.max(1, Number(option.preview_height) || 844);
-    const fittedScale = stageSize.width && stageSize.height ? Math.min(stageSize.width / width, stageSize.height / height) : 1;
+    const fittedScale = scrollable
+        ? (stageSize.width ? Math.min(1, stageSize.width / width) : 1)
+        : (stageSize.width && stageSize.height ? Math.min(stageSize.width / width, stageSize.height / height) : 1);
     const scale = fittedScale * zoom;
+    const outerStyle = scrollable ? undefined : { aspectRatio: `${width} / ${height}` };
+    const classes = `live-style-preview${scrollable ? " is-scrollable" : ""} ${className}`.trim();
     if (srcDoc) {
-        return <div ref={stageRef} className={`live-style-preview ${className}`} style={{ aspectRatio: `${width} / ${height}` }}>
+        return <div ref={stageRef} className={classes} style={outerStyle}>
             <div className="live-style-preview-sized" style={{ width: width * scale, height: height * scale }}>
-                <iframe title={`Bản xem trước ${option.name}`} srcDoc={srcDoc} sandbox="allow-scripts" style={{ width, height, transform: `scale(${scale})` }} />
+                <iframe title={`Bản xem trước ${option.name}`} srcDoc={srcDoc} sandbox="" style={{ width, height, transform: `scale(${scale})` }} />
             </div>
         </div>;
     }
-    return <div ref={stageRef} className={`live-style-preview ${className}`} style={{ aspectRatio: `${width} / ${height}` }}>{option.image && <img src={option.image} alt={`Bản xem trước ${option.name}`} />}</div>;
+    return <div ref={stageRef} className={classes} style={outerStyle}>{option.image && <img src={option.image} alt={`Bản xem trước ${option.name}`} />}</div>;
 }
 
 function StylePreviewDialog({
@@ -144,7 +148,7 @@ function StylePreviewDialog({
                     {options.map((item) => <article className={`style-preview-dialog-option${selectedStyle === item.key ? " is-selected" : ""}`} key={item.key}>
                         <strong>{item.name}</strong>
                         <p>{item.tagline}</p>
-                        <LiveStylePreview option={item} className="style-preview-dialog-option-frame" />
+                        <LiveStylePreview option={item} className="style-preview-dialog-option-frame" scrollable />
                         <button type="button" className="style-preview-dialog-select" onClick={() => onSelect(item)}>
                             {selectedStyle === item.key ? <><Check size={15} /> Đã chọn</> : <><Check size={15} /> Chọn hướng này</>}
                         </button>
@@ -235,7 +239,7 @@ function StylePreviewGallery({
                             type="button"
                             aria-label={`Phóng to bản xem trước ${option.name}`}
                         >
-                            <LiveStylePreview option={option} className="style-preview-device" />
+                            <LiveStylePreview option={option} className="style-preview-device" scrollable />
                         </button>
                         <button
                             className={`style-preview-select${selectedStyle === option.key ? " is-selected" : ""}`}
@@ -410,6 +414,7 @@ interface ParsedUserPrompt {
 
 function parseUserPrompt(raw: string): ParsedUserPrompt {
     const visible = raw.split(ATTACHMENT_CONTEXT_MARKER, 1)[0]
+        .replace(/<!--[\s\S]*?-->/g, "")
         .replace(/^\[\[DESIGNER_SCREEN_EDIT:[^\]]+\]\]\s*/, "")
         .trim();
     const match = visible.match(
@@ -427,9 +432,10 @@ function parseUserPrompt(raw: string): ParsedUserPrompt {
         .filter(Boolean);
 
     const isDefault = userText === DEFAULT_ATTACHMENT_REQUEST;
+    const isBaPackageHandoff = attachmentNames.some((name) => /^ba-package-.+\.json$/i.test(name));
 
     return {
-        text: isDefault ? "" : userText,
+        text: isDefault || isBaPackageHandoff ? "" : userText,
         attachmentNames,
     };
 }
@@ -692,11 +698,25 @@ export function ChatWorkspace({
         } catch { /* Keep the current in-memory proposal if session storage is unavailable. */ }
     }, [hulyProposalCacheKey, hulyProposalCacheOwner, hulyProposal, selectedProposalKey, selectedProposalKeys, hulyTaskConfigs, hulyDialogStage, clarificationDecisions, clarificationAnswers, hulyProjectId, hulyEpicId, hulyBulkCreated]);
 
-    const canReview =
-        (run?.stage === "review_spec" || run?.stage === "review_final") &&
-        run.status === "waiting_review";
-    const specScreens = run?.specification?.schema_version === "html-1" ? run.specification.screens : [];
+    const reviewRun =
+        (run?.status === "waiting_review" &&
+        (run.stage === "review_spec" || run.stage === "review_final"))
+            ? run
+            : runs.find(
+                  (item) =>
+                      (item.stage === "review_spec" || item.stage === "review_final") &&
+                      item.status === "waiting_review",
+              );
+    const isBusyRun = run?.status === "queued" || run?.status === "running";
+    const canReview = Boolean(reviewRun) && !isBusyRun;
+    const specScreens =
+        reviewRun?.specification?.schema_version === "html-1"
+            ? reviewRun.specification.screens
+            : run?.specification?.schema_version === "html-1"
+              ? run.specification.screens
+              : [];
     const finalApproved = Boolean(
+        !reviewRun &&
         run?.stage === "finished" &&
         run.status === "completed" &&
         run.specification?.schema_version === "html-1" &&
@@ -724,12 +744,12 @@ export function ChatWorkspace({
     }));
 
     const approveCurrentReview = async () => {
-        if (submittingReview || !onReview || finalBlocked) return;
-        if (run?.stage === "review_final") {
+        if (submittingReview || !onReview || finalBlocked || !reviewRun) return;
+        if (reviewRun.stage === "review_final") {
             setLoadingWikiPreview(true);
             setWikiPreviewError("");
             try {
-                const preview = await api.projectWikiPreview(run.id);
+                const preview = await api.projectWikiPreview(reviewRun.id);
                 setWikiVersion(preview.version);
                 setWikiPreviewFiles(preview.files);
                 const sampleImage = preview.files.findIndex((file) => file.path.endsWith(".jpg"));
@@ -737,6 +757,8 @@ export function ChatWorkspace({
             } catch (error) {
                 setWikiPreviewFiles([]);
                 setWikiPreviewError((error as Error).message || "Không tạo được bản xem trước Project Wiki.");
+            } finally {
+                setLoadingWikiPreview(false);
             }
             setWikiApprovalOpen(true);
             return;
@@ -1465,7 +1487,7 @@ export function ChatWorkspace({
                     </article>
                 )}
 
-                {canReview && run && (
+                {canReview && reviewRun && (
                     <article
                         className="message assistant-message chat-review-message"
                         aria-label="Review and approve design"
@@ -1475,7 +1497,7 @@ export function ChatWorkspace({
                             <div className="assistant-header">
                                 <small>Designer</small>
                                 <span className="chat-review-stage-badge">
-                                    {run.stage === "review_final"
+                                    {reviewRun.stage === "review_final"
                                         ? "Final Design Review"
                                         : "Specification Review"}
                                 </span>
@@ -1484,12 +1506,12 @@ export function ChatWorkspace({
                                 <div className="chat-review-card-header">
                                     <div>
                                         <h4 className="chat-review-title">
-                                            {run.stage === "review_final"
+                                            {reviewRun.stage === "review_final"
                                                 ? "Review & export design"
                                                 : "Approve UI Specification"}
                                         </h4>
                                         <p className="chat-review-subtitle">
-                                            {run.stage === "review_final"
+                                            {reviewRun.stage === "review_final"
                                                 ? "Open the design page to try the prototype, pick elements to comment on, then approve or request changes. Export .fig / PNG / HTML from there."
                                                 : specScreens.length
                                                   ? `${specScreens.length} screens planned (${specScreens.map((s) => s.name).join(", ")}). Review the specification and approve to build them.`
@@ -1569,7 +1591,7 @@ export function ChatWorkspace({
                                 </div>
 
                                 <div className="chat-review-actions">
-                                    {run.stage === "review_final" && onOpenCanvas && (
+                                    {reviewRun.stage === "review_final" && onOpenCanvas && (
                                         <button
                                             className="chat-review-btn"
                                             onClick={onOpenCanvas}
@@ -1580,7 +1602,7 @@ export function ChatWorkspace({
                                             Mở trang thiết kế
                                         </button>
                                     )}
-                                    {run.stage === "review_final" && sessionId && (
+                                    {reviewRun.stage === "review_final" && sessionId && (
                                         <a className="chat-review-btn" href={api.exportUrl(sessionId, "fig")}>
                                             <Download size={15} /> .fig
                                         </a>
@@ -1628,12 +1650,12 @@ export function ChatWorkspace({
                                             ? "Loading preview..."
                                             : submittingReview
                                               ? "Processing..."
-                                              : run.stage === "review_final"
+                                              : reviewRun.stage === "review_final"
                                                 ? "Approve Design"
                                                 : "Approve Structure"}</span>
                                     </button>
                                 </div>
-                                {wikiApprovalOpen && run.stage === "review_final" && (
+                                {wikiApprovalOpen && reviewRun.stage === "review_final" && (
                                     <div className="designer-wiki-approval-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submittingReview) setWikiApprovalOpen(false); }}>
                                         <section className="designer-wiki-approval" role="dialog" aria-modal="true" aria-label="Xác nhận lưu Design System vào Wiki">
                                             <header className="designer-wiki-approval-head"><div><h2>Chốt Designer · Xác nhận Design System vào Wiki</h2><p>Preview lấy từ backend; chính snapshot này sẽ được lưu nếu bạn xác nhận. Bấm từng file để xem.</p></div><button type="button" aria-label="Đóng" onClick={() => setWikiApprovalOpen(false)} disabled={submittingReview}><X size={18} /></button></header>

@@ -210,11 +210,22 @@ export default function App() {
     };
 
     const review = async (decision: "approved" | "changes_requested", feedback = "") => {
-        if (!activeRun) return;
+        const pendingRun =
+            (activeRun?.status === "waiting_review" &&
+            (activeRun.stage === "review_spec" || activeRun.stage === "review_final"))
+                ? activeRun
+                : runs.find(
+                      (item) =>
+                          (item.stage === "review_spec" || item.stage === "review_final") &&
+                          item.status === "waiting_review",
+                  ) ?? activeRun;
+        if (!pendingRun) return;
         try {
-            const checkpoint = activeRun.stage === "review_final" ? "final" : "specification";
-            await api.review(activeRun.id, activeRun.revision, checkpoint, decision, feedback);
-            setActiveRun(await api.getRun(activeRun.id));
+            const checkpoint = pendingRun.stage === "review_final" ? "final" : "specification";
+            await api.review(pendingRun.id, pendingRun.revision, checkpoint, decision, feedback);
+            const updated = await api.getRun(pendingRun.id);
+            setRuns((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+            setActiveRun(updated);
         } catch (error) {
             setNotice((error as Error).message);
             throw error;

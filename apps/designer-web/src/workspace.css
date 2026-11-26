@@ -2547,6 +2547,14 @@
     place-items: center;
     overflow: hidden;
 }
+.live-style-preview.is-scrollable {
+    align-items: start;
+    justify-items: center;
+    overflow-y: auto;
+    overflow-x: hidden;
+    scrollbar-width: none;
+}
+.live-style-preview.is-scrollable::-webkit-scrollbar { display: none; }
 .live-style-preview-sized { position: relative; flex: 0 0 auto; }
 .live-style-preview iframe {
     display: block;
