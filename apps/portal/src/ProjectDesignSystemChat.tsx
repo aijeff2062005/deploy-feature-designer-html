@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { ArrowUp, Check, CircleCheck, ExternalLink, LoaderCircle, MessageCircle, Sparkles, X } from "lucide-react";
+import { ArrowRight, ArrowUp, Check, CircleCheck, ExternalLink, LoaderCircle, MessageCircle, Plus, Sparkles, X } from "lucide-react";
 import { api, type ProjectStyleOption } from "./api";
 
 type ChatMessage = { role: "agent" | "user"; text: string };
@@ -9,7 +9,8 @@ function ProjectPreviewFrame({ option }: { option: ProjectStyleOption }) {
   const frameRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(0.6);
   const width = Math.max(240, option.preview_width || 390);
-  const height = Math.max(320, option.preview_height || 844);
+  const contentHeight = Math.max(320, option.preview_height || 844);
+  const frameHeight = Math.round((width <= 500 ? 780 : 720) * scale);
 
   useEffect(() => {
     const frame = frameRef.current;
@@ -19,8 +20,16 @@ function ProjectPreviewFrame({ option }: { option: ProjectStyleOption }) {
     return () => observer.disconnect();
   }, [width]);
 
-  return <div className="project-ds-preview-frame" ref={frameRef} style={{ height: height * scale }}>
-    <iframe title={`UI template ${option.name}`} srcDoc={previewDocument(option)} sandbox="" loading="lazy" style={{ width, height, transform: `scale(${scale})` }} />
+  return <div className="project-ds-preview-frame" ref={frameRef} style={{ height: frameHeight }}>
+    <div className="project-ds-preview-scaled" style={{ width: width * scale, height: contentHeight * scale }}>
+      <iframe
+        title={`UI template ${option.name}`}
+        srcDoc={previewDocument(option)}
+        sandbox=""
+        loading="lazy"
+        style={{ width, height: contentHeight, transform: `scale(${scale})` }}
+      />
+    </div>
   </div>;
 }
 
@@ -53,34 +62,49 @@ function replySuggestions(text: string): { message: string; choices: string[] } 
 }
 
 export function ProjectDesignSystemChat({
-  projectId, projectName, description, designSystemId, figmaContext = false, creationFlow = false, onClose, onOpenDesigner,
+  projectId, projectName, description, designSystemId, figmaContext = false, creationFlow = false, onClose, onOpenDesigner, onCreateFeature,
 }: {
   projectId: string; projectName: string; description: string;
   designSystemId?: string; figmaContext?: boolean;
   creationFlow?: boolean;
   onClose: () => void; onOpenDesigner: (sessionId: string) => void;
+  onCreateFeature?: () => void;
 }) {
   const [sessionId, setSessionId] = useState("");
   const sessionRef = useRef("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(true);
+  const [statusText, setStatusText] = useState("Agent đang xử lý câu trả lời…");
   const [savingKey, setSavingKey] = useState("");
   const [error, setError] = useState("");
   const [previewSet, setPreviewSet] = useState<PreviewSet | null>(null);
   const [saved, setSaved] = useState<{ version: number; name: string } | null>(null);
+  const [showNextPopup, setShowNextPopup] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }); }, [messages, previewSet, busy]);
+  useEffect(() => () => { abortRef.current?.abort(); }, []);
 
   const waitForRun = async (start: Awaited<ReturnType<typeof api.getDesignerRun>>) => {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     let run = start;
-    for (let attempt = 0; attempt < 120 && (run.status === "queued" || run.status === "running"); attempt += 1) {
-      await new Promise((resolve) => window.setTimeout(resolve, 1200));
+    const startedAt = Date.now();
+    for (let attempt = 0; attempt < 400 && (run.status === "queued" || run.status === "running"); attempt += 1) {
+      const elapsed = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+      setStatusText(`Agent đang xử lý (${elapsed}s)…`);
+      await new Promise((resolve) => window.setTimeout(resolve, 1500));
+      if (controller.signal.aborted) {
+        throw new Error("Đã đóng phiên theo dõi.");
+      }
       run = await api.getDesignerRun(start.id);
     }
+    setStatusText("Agent đang xử lý câu trả lời…");
     if (run.status === "queued" || run.status === "running") {
-      throw new Error("Agent đang xử lý lâu hơn dự kiến. Hãy thử gửi lại sau ít phút.");
+      throw new Error("Agent đang xử lý lâu hơn dự kiến. Hãy thử tải lại trang sau ít phút.");
     }
     return run;
   };
@@ -187,6 +211,7 @@ export function ProjectDesignSystemChat({
     try {
       const result = await api.approveProjectDesignTemplate(projectId, sessionId, previewSet.runId, option.key);
       setSaved({ version: result.version, name: result.name });
+      setShowNextPopup(true);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Không lưu được template vào Project Wiki.");
     } finally {
@@ -217,7 +242,7 @@ export function ProjectDesignSystemChat({
               </div>
             </div>;
           })}
-          {busy && <div className="project-ds-thinking"><span className="project-ds-thinking-icon"><Sparkles size={14} /></span><LoaderCircle className="spin" size={15} /><span>Agent đang xử lý câu trả lời…</span></div>}
+          {busy && <div className="project-ds-thinking"><span className="project-ds-thinking-icon"><Sparkles size={14} /></span><LoaderCircle className="spin" size={15} /><span>{statusText}</span></div>}
           {previewSet && <section className="project-ds-gallery">
             <div className="project-ds-gallery-head"><strong>Ba hướng giao diện cho project</strong><small>Được dựng từ mô tả và phần bạn vừa xác nhận</small></div>
             <div className="project-ds-options">
@@ -243,10 +268,31 @@ export function ProjectDesignSystemChat({
           <span>{saved ? `Project Wiki · v${saved.version}` : "Q&A · Agent hỏi theo ngữ cảnh project"}</span>
           <div>
             {sessionId && <button type="button" onClick={() => onOpenDesigner(sessionId)}><ExternalLink size={14} /> Mở Designer</button>}
+            {saved && onCreateFeature && <button type="button" className="create-feature" onClick={onCreateFeature}><Plus size={14} /> Tạo feature mới</button>}
             {saved && <button type="button" className="done" onClick={onClose}><Check size={14} /> Hoàn tất</button>}
           </div>
         </footer>
       </section>
+      {showNextPopup && saved && (
+        <div className="project-ds-next-overlay" role="dialog" aria-modal="true" aria-label="Tiếp tục tạo feature">
+          <div className="project-ds-next-dialog">
+            <div className="project-ds-next-icon"><CircleCheck size={26} /></div>
+            <h3>Đã lưu chuẩn giao diện dự án</h3>
+            <p>
+              <strong>{saved.name}</strong> (v{saved.version}) đã được lưu vào Project Wiki.
+              Bạn có thể tạo feature ngay để bắt đầu hành trình BA → Thiết kế theo đúng chuẩn giao diện này.
+            </p>
+            <div className="project-ds-next-actions">
+              <button type="button" className="btn ghost" onClick={() => setShowNextPopup(false)}>Để sau</button>
+              {onCreateFeature && (
+                <button type="button" className="btn primary" onClick={() => { setShowNextPopup(false); onCreateFeature(); }}>
+                  <Plus size={15} /> Tạo feature ngay <ArrowRight size={15} />
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

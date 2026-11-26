@@ -139,6 +139,7 @@ export function App() {
   const [creating, setCreating] = useState(false);
   const [createdProject, setCreatedProject] = useState<{ id: string; name: string; description: string; hulyUrl?: string } | null>(null);
   const [projectDesignSetup, setProjectDesignSetup] = useState<{ projectId: string; name: string; description: string; designSystemId?: string; figmaContext?: boolean } | null>(null);
+  const [creatingFeatureFor, setCreatingFeatureFor] = useState<{ projectId: string; projectName: string } | null>(null);
   const [projectRefresh, setProjectRefresh] = useState(0);
   const [railPref, setRailPref] = useState(readRailPref);
   const [journeyRailOpen, setJourneyRailOpen] = useState(false);
@@ -303,6 +304,29 @@ export function App() {
             const project = encodeURIComponent(projectDesignSetup.projectId);
             navigate(`/projects/${project}/designer?session=${encodeURIComponent(sessionId)}`);
             setProjectDesignSetup(null);
+          }}
+          onCreateFeature={() => {
+            const target = { projectId: projectDesignSetup.projectId, projectName: projectDesignSetup.name };
+            setProjectDesignSetup(null);
+            setCreating(false);
+            setCreatedProject(null);
+            navigate(`/projects/${enc(target.projectId)}`);
+            setCreatingFeatureFor(target);
+          }}
+        />
+      )}
+      {creatingFeatureFor && (
+        <CreateDialog
+          title={`Feature mới · ${creatingFeatureFor.projectName}`}
+          nameLabel="Tên feature"
+          note="Sau khi tạo, bạn bắt đầu ở bước 1 – Định nghĩa feature, cùng BA agent (kế thừa chuẩn giao diện vừa chọn)."
+          submitLabel="Bắt đầu"
+          onClose={() => setCreatingFeatureFor(null)}
+          onSubmit={async (name, description) => {
+            const created = await api.createFeature(creatingFeatureFor.projectId, name, description);
+            const pid = creatingFeatureFor.projectId;
+            setCreatingFeatureFor(null);
+            navigate(`/projects/${enc(pid)}/f/${enc(created.session_id)}`);
           }}
         />
       )}

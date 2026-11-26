@@ -496,13 +496,15 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--v
 .project-ds-gallery-head small, .project-ds-gallery-note { color: var(--text-muted); font-size: 11px; }
 .project-ds-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .project-ds-option { display: flex; min-width: 0; flex-direction: column; gap: 8px; padding: 9px; border: 1px solid var(--border-strong); border-radius: 13px; background: var(--bg-app); }
-.project-ds-option-title { display: flex; min-width: 0; align-items: center; gap: 7px; }
+.project-ds-option-title { display: flex; min-width: 0; min-height: 22px; align-items: center; gap: 7px; }
 .project-ds-option-title > span { width: 21px; height: 21px; display: grid; place-items: center; flex: 0 0 21px; border-radius: 7px; color: var(--violet); background: var(--violet-soft); font-size: 11px; font-weight: 800; }
-.project-ds-option-title strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
-.project-ds-option-title em { padding: 3px 6px; border-radius: 999px; color: var(--mint); background: var(--mint-soft); font-size: 9px; font-style: normal; }
+.project-ds-option-title strong { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.project-ds-option-title em { flex: 0 0 auto; white-space: nowrap; line-height: 1.1; padding: 3px 6px; border-radius: 999px; color: var(--mint); background: var(--mint-soft); font-size: 9px; font-style: normal; }
 .project-ds-option > p { display: -webkit-box; min-height: 34px; margin: 0; overflow: hidden; color: var(--text-muted); font-size: 10.5px; line-height: 1.5; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-.project-ds-preview-frame { position: relative; width: 100%; min-height: 280px; overflow: hidden; border-radius: 9px; background: #f3f6fb; }
-.project-ds-preview-frame iframe { position: absolute; top: 0; left: 50%; display: block; border: 0; border-radius: 9px; background: #f3f6fb; transform-origin: top center; translate: -50% 0; }
+.project-ds-preview-frame { position: relative; width: 100%; min-height: 280px; overflow-y: auto; overflow-x: hidden; scrollbar-width: none; border-radius: 9px; background: #f3f6fb; }
+.project-ds-preview-frame::-webkit-scrollbar { display: none; }
+.project-ds-preview-scaled { position: relative; margin: 0 auto; overflow: hidden; }
+.project-ds-preview-frame iframe { position: absolute; top: 0; left: 0; display: block; border: 0; background: #f3f6fb; transform-origin: top left; }
 .project-ds-option .btn { min-height: 36px; padding: 7px 8px; font-size: 11px; }
 .project-ds-gallery-note { margin: 12px 2px 0; text-align: center; }
 .project-ds-saved { display: flex; align-items: flex-start; gap: 10px; margin: 12px 0; padding: 13px; border: 1px solid color-mix(in srgb, var(--mint) 45%, transparent); border-radius: 12px; color: var(--mint); background: var(--mint-soft); }
@@ -518,7 +520,14 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--v
 .project-ds-footer > div { display: flex; gap: 12px; }
 .project-ds-footer button { display: inline-flex; align-items: center; gap: 5px; border: 0; color: var(--text-secondary); background: transparent; font: 650 11px var(--font-main); cursor: pointer; }
 .project-ds-footer button:hover { color: var(--violet); }
+.project-ds-footer button.create-feature { color: var(--violet); }
 .project-ds-footer button.done { color: var(--mint); }
+.project-ds-next-overlay { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 20px; background: rgba(12, 13, 20, 0.62); backdrop-filter: blur(4px); animation: fade .15s ease; }
+.project-ds-next-dialog { width: min(440px, 100%); padding: 24px; border: 1px solid var(--border-strong); border-radius: 18px; background: var(--bg-surface); box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35); text-align: center; animation: pop .18s ease; }
+.project-ds-next-icon { width: 48px; height: 48px; margin: 0 auto 12px; display: grid; place-items: center; border-radius: 14px; color: var(--mint); background: var(--mint-soft); }
+.project-ds-next-dialog h3 { margin: 0 0 8px; font-size: 16px; color: var(--text-primary); }
+.project-ds-next-dialog p { margin: 0 0 20px; font-size: 13px; line-height: 1.55; color: var(--text-muted); }
+.project-ds-next-actions { display: flex; justify-content: center; gap: 10px; }
 @keyframes slide-in { from { opacity: .6; transform: translateX(18px); } }
 @keyframes fade { from { opacity: 0; } }
 @keyframes pop { from { opacity: 0; transform: translateY(8px) scale(0.98); } }
