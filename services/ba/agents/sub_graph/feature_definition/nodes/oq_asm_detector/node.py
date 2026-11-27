@@ -9,7 +9,7 @@ from google.adk.agents import LlmAgent
 from agents.sub_graph.feature_definition.schemas import OQASMDetectionData
 from agents.sub_graph.feature_definition.schemas import OQFollowThroughData
 from callbacks.filter_history import create_history_filter
-from config.model_config import base_model
+from config.model_config import base_model, fast_model
 
 from .callback import (
     oq_asm_inject_context_callback,
@@ -33,7 +33,7 @@ def create_oq_asm_detector_node():
 
     return LlmAgent(
         name="oq_asm_detector",
-        model=base_model,
+        model=fast_model,
         instruction=instruction,
         output_schema=OQASMDetectionData,
         before_model_callback=[

@@ -29,6 +29,7 @@ from ..huly.proposal import (
     HulyTaskProposal,
     TaskPriority,
     fallback_proposal,
+    find_proposal_style_issues,
     proposal_prompt,
     proposal_review_prompt,
     validate_proposal_links,
@@ -68,7 +69,7 @@ class HulyBulkTaskCreate(BaseModel):
     title: str = Field(min_length=1, max_length=240)
     outcome: str = Field(min_length=1, max_length=2_000)
     current_state: str = Field(default="", max_length=2_000)
-    solution: str = Field(min_length=1, max_length=4_000)
+    solution: str = Field(default="", max_length=4_000)
     scope_in: list[str] = Field(min_length=1, max_length=12)
     scope_out: list[str] = Field(default_factory=list, max_length=12)
     acceptance_criteria: list[str] = Field(min_length=1, max_length=16)
@@ -610,18 +611,28 @@ async def propose_huly_tasks(request: Request, session_id: UUID, body: HulyPropo
         proposal_notice = "AI chưa phân tích được lúc này. Đây là bản nháp một task lấy từ thiết kế đã duyệt; hãy rà lại trước khi tạo."
     else:
         proposal = candidate
-        try:
-            reviewed = await request.app.state.llm.structured(
-                prompt=proposal_review_prompt(original_prompt=prompt, proposal=candidate),
-                schema=HulyTaskProposal,
-            )
-            validate_proposal_links(reviewed, source_ids)
-            proposal = reviewed
+        style_issues = find_proposal_style_issues(candidate)
+        if not style_issues and 1 <= len(candidate.tasks) <= 2:
             proposal_mode = "reviewed"
             proposal_reviewed = True
-        except (ValueError, AppError):
-            proposal_mode = "unreviewed"
-            proposal_notice = "AI đã tạo đề xuất nhưng chưa hoàn tất bước rà cách chia task; hãy kiểm tra kỹ luồng nghiệp vụ và phạm vi trước khi tạo."
+        else:
+            try:
+                reviewed = await request.app.state.llm.structured(
+                    prompt=proposal_review_prompt(
+                        original_prompt=prompt,
+                        proposal=candidate,
+                        style_issues=style_issues,
+                    ),
+                    schema=HulyTaskProposal,
+                    lightweight=True,
+                )
+                validate_proposal_links(reviewed, source_ids)
+                proposal = reviewed
+                proposal_mode = "reviewed"
+                proposal_reviewed = True
+            except (ValueError, AppError):
+                proposal_mode = "unreviewed"
+                proposal_notice = "AI đã tạo đề xuất nhưng chưa hoàn tất bước rà cách chia task; hãy kiểm tra kỹ luồng nghiệp vụ và phạm vi trước khi tạo."
 
     return {
         "proposal": proposal.model_dump(),
@@ -760,7 +771,7 @@ async def create_huly_issues_batch(request: Request, session_id: UUID, body: Hul
         if (
             not task.title.strip()
             or not task.outcome.strip()
-            or not task.solution.strip()
+            or (not task.solution.strip() and not task.scope_in)
             or not task.scope_in
             or any(not item.strip() for item in task.scope_in)
             or any(not item.strip() for item in task.scope_out)
@@ -843,14 +854,23 @@ async def create_huly_issues_batch(request: Request, session_id: UUID, body: Hul
             attachments.append({"filename": tokens_path.name, "content_type": "application/json", "file_path": str(tokens_path), "description": "Approved design tokens"})
 
         for task in body.tasks:
-            source_lines = [f"- {title}" for title in task.source_titles] or [f"- {ref}" for ref in task.source_refs]
+            clean_titles = [
+                re.sub(r"^(?:SCREEN:|BA:|[A-Z]{2,5}(?::EX)?:\d*\s*|\b(?:BR|US|ASM|SEC|UC|FR|NFR|REQ)-\d+\s*[-–:]?\s*)", "", title.strip()).strip()
+                for title in task.source_titles
+                if title.strip()
+            ]
+            clean_titles = [title for title in clean_titles if title]
+            ref_count = len(task.source_refs) or len(clean_titles)
+            source_summary = f"Đề xuất dựa trên yêu cầu nghiệp vụ, luồng thao tác và thiết kế màn hình đã duyệt ({ref_count} mục)."
             sections = [
-                "**Tài liệu tham chiếu:**\n" + "\n".join(source_lines),
+                f"**Căn cứ công việc:** {source_summary}",
                 "## 🎯 Mục tiêu\n" + task.outcome.strip(),
             ]
             if task.current_state.strip():
                 sections.append("## 📌 Hiện trạng\n" + task.current_state.strip())
-            solution_parts = ["## 🛠 Giải pháp\n" + task.solution.strip()]
+            solution_parts: list[str] = ["## 🛠 Phạm vi & Giải pháp"]
+            if task.solution.strip():
+                solution_parts.append(task.solution.strip())
             if task.scope_in:
                 solution_parts.append("**Phạm vi triển khai**\n" + "\n".join(f"- {item}" for item in task.scope_in))
             if task.scope_out:
@@ -859,7 +879,7 @@ async def create_huly_issues_batch(request: Request, session_id: UUID, body: Hul
             if task.clarification_notes:
                 sections.append("## ⚠️ Cần chốt trước khi bắt đầu\n" + "\n".join(f"- {item}" for item in task.clarification_notes))
             sections.extend([
-                "## 📋 Tiêu chí chấp nhận\n| # | Tình huống kiểm thử |\n|---:|---|\n" + "\n".join(f"| {index} | {item.replace('|', '／')} |" for index, item in enumerate(task.acceptance_criteria, start=1)),
+                "## 📋 Tiêu chí chấp nhận\n" + "\n".join(f"- {item}" for item in task.acceptance_criteria),
             ])
             if task.priority_rationale.strip():
                 sections.append("> **Lý do ưu tiên:** " + task.priority_rationale.strip())

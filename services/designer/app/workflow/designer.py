@@ -868,6 +868,7 @@ class HtmlDesigner:
                 message=_clip(run_prompt, 20_000),
             ),
             schema=DesignDecision,
+            lightweight=True,
             usage=usage,
         )
         await self._usage(run, usage, "router")
@@ -1625,6 +1626,7 @@ class HtmlDesigner:
                     schema=_StylePreviewReviewBatch,
                     max_attempts=2,
                     model=settings.effective_designer_model,
+                    lightweight=True,
                     usage=normalize_usage,
                 )
                 add_usage(normalize_usage)
@@ -2265,6 +2267,7 @@ class HtmlDesigner:
                 image_bytes=result.image,
                 images=[style_reference["image"]] if style_reference else None,
                 model=model,
+                lightweight=True,
                 usage=audit_usage,
                 max_attempts=2,
             )

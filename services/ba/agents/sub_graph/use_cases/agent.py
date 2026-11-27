@@ -13,6 +13,7 @@ from google.adk.workflow import Workflow
 
 from agents.sub_graph.shared.constants import PENDING_SEMANTIC
 from agents.sub_graph.shared.discussion_tools import discussion_tools
+from agents.sub_graph.shared.choices_prompt import USER_CHOICES_INSTRUCTION
 from agents.sub_graph.shared.semantic_flags import (
     SemanticFlagsEvaluation,
     apply_semantic_flag_evaluations,
@@ -28,7 +29,7 @@ from agents.sub_graph.use_cases.merge import (
 from agents.sub_graph.use_cases.schemas import UseCasesData
 from callbacks.filter_history import create_history_filter
 from callbacks.inject_context import insert_context
-from config.model_config import base_model
+from config.model_config import base_model, fast_model
 from utils.utils import parse_str_to_dict
 
 
@@ -178,10 +179,11 @@ _uc_flags_instruction += (
 
 _uc_extractor = LlmAgent(
     name="uc_extractor",
-    model=base_model,
+    model=fast_model,
     instruction=(
-        "Trích xuất User Stories (user story + acceptance criteria). "
-        "Trích xuất và cập nhật ĐẦY ĐỦ TẤT CẢ các User Story mà người dùng cung cấp hoặc chỉnh sửa trong lượt này (hỗ trợ nhập nhiều US cùng lúc). "
+        "Trích xuất User Stories (user story + acceptance criteria) theo chế độ DELTA: "
+        "CHỈ trả về các User Story được người dùng thêm mới hoặc chỉnh sửa trong lượt này; KHÔNG lặp lại các US cũ không thay đổi (backend tự merge theo id). "
+        "Nếu người dùng không thêm/sửa US nào (chỉ xác nhận hoặc hỏi), trả `{\"use_cases\": []}`. "
         "statement BẮT BUỘC đúng mẫu: 'Là ..., tôi muốn ... để ...' (luôn có cả 'muốn' và 'để'). "
         "Một actor, một goal; AC cite BR-XX đã có. "
         "actor_id phải khớp ACT-ID từ Feature Definition. "
@@ -189,7 +191,7 @@ _uc_extractor = LlmAgent(
     ),
     output_schema=UseCasesData,
     before_model_callback=[
-        create_history_filter(visible_authors=["uc_discussion"], max_turns=5),
+        create_history_filter(visible_authors=["uc_discussion"], max_turns=2),
         uc_extractor_inject,
     ],
     after_model_callback=uc_merge,
@@ -197,7 +199,7 @@ _uc_extractor = LlmAgent(
 
 _uc_flags = LlmAgent(
     name="uc_flags_checker",
-    model=base_model,
+    model=fast_model,
     instruction=_uc_flags_instruction,
     output_schema=SemanticFlagsEvaluation,
     before_model_callback=uc_flags_before,
@@ -220,7 +222,8 @@ _uc_discussion = LlmAgent(
         "do NOT `web_search` for FD scope_out / non-goals / unrelated browsing; "
         "`web_search` only after wiki miss for in-package clarification "
         "(if not configured, say so — do not hallucinate); "
-        "`preview_bpmn` after WF has actor-step rows. Never approve/ingest/propose."
+        "`preview_bpmn` after WF has actor-step rows. Never approve/ingest/propose.\n\n"
+        + USER_CHOICES_INSTRUCTION
     ),
     tools=discussion_tools(include_preview_bpmn=True),
     before_model_callback=[

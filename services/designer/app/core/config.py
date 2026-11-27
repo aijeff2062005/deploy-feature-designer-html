@@ -17,6 +17,7 @@ class Settings(BaseSettings):
 
     llm_model: str = Field(validation_alias=AliasChoices("DESIGNER_LLM_MODEL", "LLM_MODEL"))
     designer_model: str = Field("", validation_alias=AliasChoices("DESIGNER_CANVAS_MODEL", "DESIGNER_MODEL"))
+    designer_fast_model: str = Field("", validation_alias=AliasChoices("DESIGNER_FAST_MODEL", "FAST_LLM_MODEL"))
     # Designer-specific overrides; an empty value falls back to the shared LLM_*.
     api_key: str = Field("", validation_alias=AliasChoices("DESIGNER_LLM_API_KEY", "API_KEY"))
     base_url: str = Field("", validation_alias=AliasChoices("DESIGNER_LLM_BASE_URL", "BASE_URL"))
@@ -44,6 +45,7 @@ class Settings(BaseSettings):
     # A whole screen is one tool call: leave room for it, and keep "thinking" from eating the budget.
     designer_max_output_tokens: int = Field(32000, validation_alias="DESIGNER_MAX_OUTPUT_TOKENS")
     designer_reasoning_effort: str = Field("low", validation_alias="DESIGNER_REASONING_EFFORT")
+    designer_light_reasoning_effort: str = Field("minimal", validation_alias="DESIGNER_LIGHT_REASONING_EFFORT")
 
     @model_validator(mode="after")
     def _fallback_to_shared_llm(self) -> "Settings":
@@ -58,6 +60,10 @@ class Settings(BaseSettings):
     @property
     def effective_designer_model(self) -> str:
         return self.designer_model.strip() or self.llm_model
+
+    @property
+    def effective_fast_model(self) -> str:
+        return self.designer_fast_model.strip() or self.llm_model
 
     @property
     def masked_api_key(self) -> str:

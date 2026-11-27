@@ -93,6 +93,8 @@ class AdkProvider:
         message: types.Content | None = None,
         timeout_seconds: float | None = None,
         model: str | None = None,
+        lightweight: bool = False,
+        reasoning_effort: str | None = None,
         stop_when: Callable[[], bool] | None = None,
         progress_token: Callable[[], str] | None = None,
         continuation_message: str = "",
@@ -123,15 +125,27 @@ class AdkProvider:
                 )
             return {"ok": False, "error": str(error), "next_step": "Correct the tool arguments and retry."}
 
+        chosen_model = model or (
+            self.settings.effective_fast_model if lightweight else self.settings.llm_model
+        )
+        effective_effort = (
+            reasoning_effort
+            if reasoning_effort is not None
+            else (
+                self.settings.designer_light_reasoning_effort
+                if lightweight
+                else self.settings.designer_reasoning_effort
+            )
+        )
         agent = LlmAgent(
             name="page_designer",
             model=LiteLlm(
-                model=model or self.settings.llm_model,
+                model=chosen_model,
                 api_key=self.settings.api_key,
                 api_base=self.settings.cleaned_base_url,
                 max_tokens=self.settings.designer_max_output_tokens,
-                **({"reasoning_effort": self.settings.designer_reasoning_effort}
-                   if self.settings.designer_reasoning_effort else {}),
+                drop_params=True,
+                **({"reasoning_effort": effective_effort} if effective_effort else {}),
             ),
             # Markdown/JSX is already rendered; bypass ADK's {state} expansion.
             instruction=lambda _context: prompt,
@@ -236,7 +250,7 @@ class AdkProvider:
             logger.info("Pre-warming LLM connection to %s (%s)...", self.settings.base_url, self.settings.llm_model)
             try:
                 async with asyncio.timeout(15):
-                    await self.text(prompt="ping", max_attempts=1)
+                    await self.text(prompt="ping", max_attempts=1, lightweight=True)
                 self._is_warmed = True
                 logger.info("LLM connection pre-warmed successfully!")
             except Exception as exc:
@@ -252,6 +266,8 @@ class AdkProvider:
         image_mime_type: str = "image/jpeg",
         max_attempts: int = 3,
         model: str | None = None,
+        lightweight: bool = False,
+        reasoning_effort: str | None = None,
         usage: dict[str, int] | None = None,
     ) -> ModelT:
         correction = ""
@@ -272,6 +288,8 @@ class AdkProvider:
                     max_turns=1,
                     timeout_seconds=LLM_TIMEOUT_SECONDS,
                     model=model,
+                    lightweight=lightweight,
+                    reasoning_effort=reasoning_effort,
                     usage=usage,
                 )
                 return parse_structured_output(content, schema)
@@ -299,6 +317,8 @@ class AdkProvider:
         images: list[bytes] | None = None,
         usage: dict[str, int] | None = None,
         model: str | None = None,
+        lightweight: bool = False,
+        reasoning_effort: str | None = None,
         timeout_seconds: float | None = None,
         max_attempts: int = 2,
     ) -> str:
@@ -310,7 +330,8 @@ class AdkProvider:
             try:
                 content = await self.run_tools(
                     prompt=system, tools=[], max_turns=1, message=types.Content(role="user", parts=parts),
-                    timeout_seconds=timeout_seconds, model=model, usage=usage,
+                    timeout_seconds=timeout_seconds, model=model,
+                    lightweight=lightweight, reasoning_effort=reasoning_effort, usage=usage,
                 )
                 if not content.strip():
                     raise ValueError("Model returned no text")
@@ -324,7 +345,14 @@ class AdkProvider:
                     await asyncio.sleep(1)
         raise AppError("LLM_REQUEST_FAILED", "Model request failed", str(last_error), 502, True) from last_error
 
-    async def text(self, *, prompt: str, max_attempts: int = 3) -> str:
+    async def text(
+        self,
+        *,
+        prompt: str,
+        max_attempts: int = 3,
+        lightweight: bool = False,
+        reasoning_effort: str | None = None,
+    ) -> str:
         last_error: Exception | None = None
         for attempt in range(max_attempts):
             try:
@@ -334,6 +362,8 @@ class AdkProvider:
                     max_turns=1,
                     message=types.Content(role="user", parts=[types.Part.from_text(text=prompt)]),
                     timeout_seconds=LLM_TIMEOUT_SECONDS,
+                    lightweight=lightweight,
+                    reasoning_effort=reasoning_effort,
                 )
                 if not content.strip():
                     raise ValueError("Model returned no text")

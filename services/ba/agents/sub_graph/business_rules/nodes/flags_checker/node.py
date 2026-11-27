@@ -18,7 +18,7 @@ from agents.sub_graph.shared.semantic_flags import (
     empty_evaluation_response,
 )
 from callbacks.inject_context import insert_context
-from config.model_config import base_model
+from config.model_config import fast_model
 
 from .logic import check_br_flags_logic
 
@@ -65,7 +65,7 @@ def create_br_flags_checker_node():
     )
     return LlmAgent(
         name="br_flags_checker",
-        model=base_model,
+        model=fast_model,
         instruction=instruction,
         output_schema=SemanticFlagsEvaluation,
         before_model_callback=br_flags_checker_before_model,

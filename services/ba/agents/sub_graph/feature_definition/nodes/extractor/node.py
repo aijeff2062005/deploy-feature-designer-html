@@ -8,7 +8,7 @@ from google.adk.agents import LlmAgent
 
 from agents.sub_graph.feature_definition.schemas import FeatureDefinitionData
 from callbacks.filter_history import create_history_filter
-from config.model_config import base_model
+from config.model_config import fast_model
 
 from .callback import fd_extractor_inject_callback, fd_merge_callback
 
@@ -24,7 +24,7 @@ def create_fd_extractor_node():
 
     return LlmAgent(
         name="fd_extractor",
-        model=base_model,
+        model=fast_model,
         instruction=instruction,
         output_schema=FeatureDefinitionData,
         before_model_callback=[

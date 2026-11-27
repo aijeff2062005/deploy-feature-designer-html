@@ -30,3 +30,19 @@ base_model = LiteLlm(
     # Models that reject top_p / penalties (e.g. OpenAI reasoning models) get them dropped.
     drop_params=True,
 )
+
+_fast_model_name = settings.ba_fast_llm_model.strip() or model_name
+fast_model = LiteLlm(
+    model=f"openai/{_fast_model_name}",
+    api_base=api_base_url,
+    api_key=api_key,
+    top_p=settings.top_p,
+    temperature=settings.temperature,
+    presence_penalty=settings.presence_penalty,
+    frequency_penalty=settings.frequency_penalty,
+    max_tokens=settings.max_tokens,
+    timeout=240,
+    num_retries=0,
+    chat_template_kwargs={"enable_thinking": False},
+    drop_params=True,
+)

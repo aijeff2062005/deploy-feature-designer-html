@@ -85,6 +85,11 @@ class Settings(BaseSettings):
         default="Qwen3.5-27B-AWQ",
         description="Model id on the company LLM gate",
     )
+    ba_fast_llm_model: str = Field(
+        validation_alias=AliasChoices("BA_FAST_LLM_MODEL", "FAST_LLM_MODEL"),
+        default="",
+        description="Optional faster model for lightweight BA nodes (extractors, flag checkers)",
+    )
     top_p: float = Field(default=0.1, description="Top-p sampling parameter")
     temperature: float = Field(default=0.0, description="Temperature parameter")
     presence_penalty: float = Field(default=0.0, description="Presence penalty")

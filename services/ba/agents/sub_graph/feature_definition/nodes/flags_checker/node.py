@@ -20,7 +20,7 @@ from agents.sub_graph.shared.semantic_flags import (
     apply_semantic_flag_evaluations,
 )
 from agents.sub_graph.shared.constants import PENDING_SEMANTIC
-from config.model_config import base_model
+from config.model_config import fast_model
 from utils import logging
 
 from .callback import fd_flags_checker_before_model
@@ -67,7 +67,7 @@ def create_fd_flags_checker_node():
     )
     return LlmAgent(
         name="fd_flags_checker",
-        model=base_model,
+        model=fast_model,
         instruction=instruction,
         output_schema=SemanticFlagsEvaluation,
         before_model_callback=fd_flags_checker_before_model,
