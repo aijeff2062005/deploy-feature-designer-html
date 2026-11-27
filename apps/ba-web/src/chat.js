@@ -1696,10 +1696,11 @@ function renderAgentChoiceCard() {
       isTier1Completed ? {} : sectionStates[sec.id]?.flagValues,
     );
   }
+  const isFixFallback = String(batch?.signature || '').startsWith('fix:');
   if (
     !batch ||
     isProceduralChoicePrompt(batch) ||
-    lastAnsweredQuestionBySec[sec.id] === batch.signature
+    (!isFixFallback && lastAnsweredQuestionBySec[sec.id] === batch.signature)
   ) {
     card.hidden = true;
     card.innerHTML = '';
@@ -3127,11 +3128,9 @@ function showTypingIndicator(label = 'Đang phân tích yêu cầu...') {
       </div>
       <span class="typing-status-text"></span>
       <span class="typing-elapsed">0s</span>
-      ${activeChatAbortController ? '<button type="button" class="typing-cancel-btn" title="Dừng phản hồi">Hủy</button>' : ''}
     </div>
   `;
   row.querySelector('.typing-status-text').textContent = label;
-  row.querySelector('.typing-cancel-btn')?.addEventListener('click', cancelActiveChat);
   chatStream.appendChild(row);
   chatStream.scrollTop = chatStream.scrollHeight;
 

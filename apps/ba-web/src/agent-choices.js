@@ -221,19 +221,26 @@ export function extractFeedbackFixChoices(lastMsgText, secFlags = [], rawFlagVal
   }
 
   if (options.length === 0 && Array.isArray(secFlags) && rawFlagValues && typeof rawFlagValues === 'object') {
+    const hasAnyPass = Object.values(rawFlagValues).some(
+      (raw) => String(typeof raw === 'object' && raw ? raw.status : raw || '').toUpperCase() === 'PASS',
+    );
     for (const flag of secFlags) {
       const raw = rawFlagValues[flag.id];
       const status = String(typeof raw === 'object' && raw ? raw.status : raw || '').toUpperCase();
-      if (status !== 'FAIL' && status !== 'NOT_YET_REASONABLE') continue;
+      const isFail = status === 'FAIL' || status === 'NOT_YET_REASONABLE';
+      const isMissingBlockerAfterInput = hasAnyPass && status === 'MISSING_VALUE' && flag.severity === 'blocker';
+      if (!isFail && !isMissingBlockerAfterInput) continue;
       const detail = cleanText(typeof raw === 'object' && raw ? raw.detail : '').replace(/`+/g, '').slice(0, 220);
       const label = cleanText(flag.label || flag.id);
       const key = label.toLowerCase();
       if (!label || seenLabels.has(key)) continue;
       seenLabels.add(key);
-      usedFix = true;
+      if (isMissingBlockerAfterInput && !isFail) usedSuggest = true;
+      else usedFix = true;
+      const prefix = isMissingBlockerAfterInput && !isFail ? 'Bổ sung' : 'Sửa lỗi';
       options.push({
         label,
-        value: detail ? `Sửa lỗi ${label}: ${detail}` : `Sửa lỗi ${label}`,
+        value: detail ? `${prefix} ${label}: ${detail}` : `${prefix} ${label}`,
         recommended: true,
       });
       if (options.length >= 6) break;
