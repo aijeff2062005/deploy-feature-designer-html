@@ -23,7 +23,7 @@ Rules:
 - Whenever you fill `brief`, set `brief.design_query`: 4-8 English keywords for the product type, industry, audience and platform (e.g. "university e-learning student mobile app"); it selects the design knowledge.
 - Interactive choice card (`AGENT_CHOICES_JSON` — REQUIRED when asking for confirmation or A/B choices): WHENEVER `reply` ends with a confirmation/approval question or asks the user to choose between 2+ concrete options (NEVER for open-ended questions, and NEVER when `start_design` triggers the visual style gallery), you MUST append a raw single-line hidden block (NO markdown code fences around it) at the very end of `reply`:
   `<!-- AGENT_CHOICES_JSON:{"question":"Câu hỏi ngắn gọn","multi":false,"options":[{"label":"Nhãn ngắn","value":"Câu chỉ dẫn đầy đủ bằng tiếng Việt","recommended":true},{"label":"Phương án khác","value":"Câu chỉ dẫn đầy đủ bằng tiếng Việt"}]} -->`
-  `options[].value` MUST be a complete, natural Vietnamese sentence (never a snake_case/kebab-case slug). Never re-ask a question or option the user already answered. Max 5 options; never include an "Other/Khác" option (the UI adds one automatically); never mention `AGENT_CHOICES_JSON` in prose.
+  Because `reply` is itself a JSON string field in the outer response, you MUST JSON-escape every `"` inside that block as `\"` (so the outer JSON remains 100% valid). `options[].value` MUST be a complete, natural Vietnamese sentence (never a snake_case/kebab-case slug). Never re-ask a question or option the user already answered. Max 5 options; never include an "Other/Khác" option (the UI adds one automatically); never mention `AGENT_CHOICES_JSON` in prose.
 
 Required screen design knowledge (follow these rules):
 {{design_rules}}

@@ -52,11 +52,39 @@ function previewDocument(option: ProjectStyleOption): string {
   return `<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${policy}"><style>${css}\n${frameCss}</style></head><body>${option.html}</body></html>`;
 }
 
+const CHOICE_TAG_RE = /<!--\s*AGENT[\s_-]+CHOICES[\s_-]+JSON\s*:([\s\S]*?)-->/i;
+const CHOICE_TAG_ALL_RE = /<!--\s*AGENT[\s_-]+CHOICES[\s_-]+JSON\s*:[\s\S]*?-->/gi;
+const FENCED_CHOICE_TAG_RE = /```(?:html|json)?\s*<!--\s*AGENT[\s_-]+CHOICES[\s_-]+JSON\s*:[\s\S]*?-->\s*```/gi;
+const stripChoicesTag = (text: string) =>
+  String(text || "").replace(FENCED_CHOICE_TAG_RE, "").replace(CHOICE_TAG_ALL_RE, "").trim();
+
 function replySuggestions(text: string): { message: string; choices: string[] } {
-  const match = text.match(/\n?Gợi ý trả lời:\s*(.+)$/im);
-  if (!match) return { message: text, choices: [] };
+  const choices: string[] = [];
+  const tagMatch = text.match(CHOICE_TAG_RE);
+  if (tagMatch) {
+    try {
+      const parsed = JSON.parse(tagMatch[1]) as {
+        options?: Array<string | { label?: string; value?: string }>;
+        questions?: Array<{ options?: Array<string | { label?: string; value?: string }> }>;
+      };
+      const rawOpts = parsed.options || parsed.questions?.[0]?.options || [];
+      for (const opt of rawOpts) {
+        const label = typeof opt === "string" ? opt.trim() : (opt.value || opt.label || "").trim();
+        if (label) choices.push(label);
+        if (choices.length >= 4) break;
+      }
+    } catch {
+      /* ignore malformed choice json */
+    }
+  }
+  const cleaned = stripChoicesTag(text);
+  if (choices.length > 0) {
+    return { message: cleaned, choices };
+  }
+  const match = cleaned.match(/\n?Gợi ý trả lời:\s*(.+)$/im);
+  if (!match) return { message: cleaned, choices: [] };
   return {
-    message: text.slice(0, match.index).trim(),
+    message: cleaned.slice(0, match.index).trim(),
     choices: match[1].split(/\s*\|\s*/).map((item) => item.trim()).filter(Boolean).slice(0, 4),
   };
 }

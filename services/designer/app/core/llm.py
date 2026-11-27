@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Callable
 from typing import Any, TypeVar
 from uuid import uuid4
@@ -46,6 +47,17 @@ def build_structured_content(
     return types.Content(role="user", parts=parts)
 
 
+_CHOICE_TAG_IN_JSON_RE = re.compile(r"(<!--\s*AGENT[\s_-]+CHOICES[\s_-]+JSON\s*:[\s\S]*?-->)", re.I)
+
+
+def _repair_embedded_choice_tags(text: str) -> str:
+    """Escape unescaped double quotes inside <!-- AGENT_CHOICES_JSON:... --> embedded in JSON strings."""
+    return _CHOICE_TAG_IN_JSON_RE.sub(
+        lambda m: re.sub(r'(?<!\\)"', r'\"', m.group(1)),
+        text,
+    )
+
+
 def parse_structured_output(content: str, schema: type[ModelT]) -> ModelT:
     text = content.strip()
     if text.startswith("```"):
@@ -61,6 +73,12 @@ def parse_structured_output(content: str, schema: type[ModelT]) -> ModelT:
     try:
         return schema.model_validate_json(text)
     except ValidationError as primary_error:
+        repaired = _repair_embedded_choice_tags(text)
+        if repaired != text:
+            try:
+                return schema.model_validate_json(repaired)
+            except ValidationError:
+                pass
         log_agent_error(
             "llm_json_parse",
             f"Structured schema validation failed for {schema.__name__}",
