@@ -47,6 +47,40 @@ TURN_TIMEOUT_SECONDS = 300
 OQ_TURN_TIMEOUT_SECONDS = 900
 
 
+def _progress_label_for_event(event) -> tuple[str, str] | None:
+    """Map an ADK runner event (tool call or node author) to a concise Vietnamese progress label."""
+    try:
+        calls = event.get_function_calls() if hasattr(event, "get_function_calls") else None
+    except Exception:  # noqa: BLE001
+        calls = None
+    if calls:
+        for call in calls:
+            name = str(getattr(call, "name", "") or "").lower()
+            if "wiki" in name:
+                return ("tool_wiki", "Đang tra cứu Project Wiki...")
+            if "bpmn" in name:
+                return ("tool_bpmn", "Đang dựng sơ đồ BPMN...")
+            if "web_search" in name or "search" in name:
+                return ("tool_search", "Đang tìm kiếm thông tin...")
+            if name:
+                return (f"tool_{name}", f"Đang chạy công cụ {name}...")
+
+    author = str(getattr(event, "author", "") or "").lower()
+    if not author or author == "user":
+        return None
+    if author.endswith("_extractor"):
+        return ("extract", "Đang trích xuất & cập nhật nội dung...")
+    if author.endswith("_flags_checker"):
+        return ("flags", "Đang kiểm tra tính đầy đủ...")
+    if "oq_asm" in author or "oq_artifact" in author:
+        return ("oq", "Đang rà soát câu hỏi tồn đọng...")
+    if author.endswith("_discussion"):
+        return ("discuss", "Đang soạn phản hồi...")
+    if "validation" in author or author.startswith("va_"):
+        return ("validate", "Đang chạy kiểm tra tổng thể (Validate)...")
+    return None
+
+
 def _validate_chat_input(session_id: str, req: AgentChatRequest) -> None:
     """Validate request inputs before processing."""
     if not session_id or not session_id.strip():
@@ -269,6 +303,8 @@ async def chat_message_stream(session_id: str, req: AgentChatRequest):
         error_message: str | None = None
         emitted_text = False
         stream_ended = False
+        last_progress_label: str | None = "Đang phân tích yêu cầu..."
+        yield sse_event("chat.progress", {"stage": "start", "label": last_progress_label})
         try:
             turn_timeout = (
                 OQ_TURN_TIMEOUT_SECONDS
@@ -282,6 +318,13 @@ async def chat_message_stream(session_id: str, req: AgentChatRequest):
                     new_message=content,
                     state_delta=state_delta or None,
                 ):
+                    progress = _progress_label_for_event(event)
+                    if progress and progress[1] != last_progress_label:
+                        last_progress_label = progress[1]
+                        yield sse_event(
+                            "chat.progress",
+                            {"stage": progress[0], "label": progress[1]},
+                        )
                     if (
                         event.content
                         and event.content.parts

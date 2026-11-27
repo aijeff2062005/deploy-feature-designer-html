@@ -6,6 +6,7 @@ from google.adk.agents import LlmAgent
 
 from callbacks.filter_history import create_history_filter
 from config.model_config import base_model
+from agents.sub_graph.shared.choices_prompt import USER_CHOICES_INSTRUCTION
 
 from .callback import br_discussion_inject_callback
 
@@ -19,7 +20,8 @@ def create_br_discussion_node():
             "Xác nhận rules theo CHECKLIST (ưu tiên required=true). "
             "Không dùng mã flag (BR-F1…) với User. "
             "Nhắc OQ/Assumptions nếu có. "
-            "Gợi ý rule còn thiếu từ Feature Definition khi phù hợp."
+            "Gợi ý rule còn thiếu từ Feature Definition khi phù hợp.\n\n"
+            + USER_CHOICES_INSTRUCTION
         ),
         tools=[],
         before_model_callback=[

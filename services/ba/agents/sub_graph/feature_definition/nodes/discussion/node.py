@@ -7,6 +7,7 @@ from pathlib import Path
 from google.adk.agents import LlmAgent
 
 from agents.sub_graph.shared.discussion_tools import discussion_tools
+from agents.sub_graph.shared.choices_prompt import USER_CHOICES_INSTRUCTION
 from callbacks.filter_history import create_history_filter
 from config.model_config import base_model
 
@@ -36,6 +37,7 @@ def create_fd_discussion_node():
     )
     if "# TOOLS" not in instruction:
         instruction = instruction.rstrip() + _TOOLS_HINT
+    instruction = instruction.rstrip() + "\n\n" + USER_CHOICES_INSTRUCTION
 
     return LlmAgent(
         name="fd_discussion",
