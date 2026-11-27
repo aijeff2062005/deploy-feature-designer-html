@@ -583,10 +583,13 @@
       </div>
 
       <!-- Chat Stream -->
+      <div id="validationFixBanner" class="validation-fix-banner" hidden></div>
       <div class="chat-stream" id="chatStream"></div>
 
       <!-- Input Dock -->
       <div class="input-dock">
+        <div id="sectionActionBar" class="section-action-bar" hidden></div>
+        <div id="agentChoiceCard" class="agent-choice-card animate-fadeIn" hidden></div>
         <div id="pendingEditsBanner" class="pending-edits-banner animate-fadeIn" style="display: none;"></div>
         <div class="composer-field">
           <textarea class="chat-input" id="chatInput" placeholder="Trả lời hoặc bổ sung thông tin cho BA agent… (Enter để gửi, Shift+Enter xuống dòng)"></textarea>
@@ -603,6 +606,10 @@
               <svg class="composer-send-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                 <path d="M8 12.5V3.5M8 3.5 4.25 7.25M8 3.5l3.75 3.75" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
               </svg>
+            </button>
+            <button class="composer-cancel" id="btnCancelSend" type="button" aria-label="Dừng phản hồi" title="Dừng phản hồi" hidden>
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="2"/></svg>
+              <span>Dừng</span>
             </button>
           </div>
         </div>
@@ -626,6 +633,7 @@
 
   </div>
 
+  <div id="validationFixModal" class="val-fix-overlay" hidden role="dialog" aria-modal="true" aria-label="Danh sách lỗi Validation cần sửa"></div>
   <script type="module" src="/src/chat.js"></script>
 </body>
 </html>

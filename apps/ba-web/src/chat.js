@@ -13,6 +13,8 @@ import { isEmbedded } from './platform.js';
 import { sendChatMessage, reconcileContinuity, getFeature, getChatHistory, exportFeature, exportAndOpenDesigner, getFeatureWikiPreview, getFeatureDocuments, downloadBpmn, saveTouchpoints } from './api.js';
 import { initColumnResize } from './column-resize.js';
 import { escapeHtml, formatChatMarkdown } from './markdown.js';
+import { extractAgentChoices, extractFeedbackFixChoices, formatBatchSubmission, formatChoiceSubmission, isLocalDismissChoice, isProceduralChoicePrompt, isUpdateChoice, stripAgentChoicesTag } from './agent-choices.js';
+import { buildAgentFixPrompt, groupValidationFindings } from './validation-fix.js';
 import { destroyBpmnPreview, renderBpmnDiagram, resizeBpmnPreview } from './bpmn-viewer.js';
 import { renderApprovedWikiDocs } from './wiki-docs-list.js';
 
@@ -397,12 +399,20 @@ function setControlEnabled(el, enabled, reason) {
   }
 }
 
-function setSendBusy(busy) {
+function setSendBusy(busy, { allowCancel = true } = {}) {
   const sendBtn = document.getElementById('btnSend');
-  if (!sendBtn) return;
-  sendBtn.classList.toggle('is-sending', busy);
-  sendBtn.setAttribute('aria-busy', busy ? 'true' : 'false');
-  sendBtn.setAttribute('aria-label', busy ? 'Đang xử lý...' : 'Gửi cho Agent');
+  const cancelBtn = document.getElementById('btnCancelSend');
+  const showCancel = Boolean(busy && allowCancel);
+  if (sendBtn) {
+    sendBtn.hidden = showCancel;
+    sendBtn.classList.toggle('is-sending', busy);
+    sendBtn.setAttribute('aria-busy', busy ? 'true' : 'false');
+    sendBtn.setAttribute('aria-label', busy ? 'Đang xử lý...' : 'Gửi cho Agent');
+  }
+  if (cancelBtn) {
+    cancelBtn.hidden = !showCancel;
+    cancelBtn.disabled = !showCancel;
+  }
 }
 
 function syncControlButtons(stateData = {}) {
@@ -543,6 +553,15 @@ function unwrapSectionData(data, sectionId) {
 const chatStream = document.getElementById('chatStream');
 const chatInput = document.getElementById('chatInput');
 const btnSend = document.getElementById('btnSend');
+const btnCancelSend = document.getElementById('btnCancelSend');
+let activeChatAbortController = null;
+
+function cancelActiveChat() {
+  if (activeChatAbortController) {
+    activeChatAbortController.abort();
+    activeChatAbortController = null;
+  }
+}
 const checklistGrid = document.getElementById('checklistGrid');
 const pendingEditsBanner = document.getElementById('pendingEditsBanner');
 const referenceAssetInput = document.getElementById('referenceAssetInput');
@@ -1294,6 +1313,7 @@ async function loadWikiDocuments() {
 
 function bindEvents() {
   btnSend.addEventListener('click', handleSend);
+  if (btnCancelSend) btnCancelSend.addEventListener('click', cancelActiveChat);
   if (btnAttachReference && referenceAssetInput) {
     btnAttachReference.addEventListener('click', () => referenceAssetInput.click());
     referenceAssetInput.addEventListener('change', handleReferenceAssetChange);
@@ -1386,6 +1406,7 @@ function renderSectionList() {
   const g2El = document.getElementById('group2List');
   g1El.innerHTML = '';
   g2El.innerHTML = '';
+  const valGrouped = groupValidationFindings(lastValidation, SECTIONS);
 
   SECTIONS.forEach((sec, idx) => {
     const state = sectionStates[sec.id];
@@ -1394,6 +1415,8 @@ function renderSectionList() {
 
     const flagValues = state.flagValues || {};
     const progress = formatFlagProgressParts(sec, flagValues);
+    const valBucket = valGrouped.bySection.get(sec.id);
+    const valErrCount = valGrouped.isFailed && valBucket ? valBucket.errors.length : 0;
 
     const item = document.createElement('div');
     item.className = `section-item ${isActive ? 'active' : ''} ${isLocked ? 'locked' : ''}`;
@@ -1404,6 +1427,7 @@ function renderSectionList() {
     }
 
     const stampHtml = REGISTER_IDS.has(sec.id) ? getRegisterStamp(sec.id) : getStatusStamp(state.status);
+    const valBadgeHtml = valErrCount > 0 ? `<span class="section-val-err">${valErrCount} lỗi VA</span>` : '';
     const failStat = progress && progress.fails
       ? `<span class="stat-fail">${progress.fails}</span>`
       : '';
@@ -1422,6 +1446,7 @@ function renderSectionList() {
       <div class="section-item-head">
         <span class="mono section-item-id">${sec.num}</span>
         <span class="section-item-title">${sec.title}</span>
+        ${valBadgeHtml}
         ${stampHtml}
       </div>
       <div class="section-item-body">
@@ -1517,6 +1542,560 @@ function renderChecklist() {
     visibleFlags.length > 0 ? formatFlagProgressCompact(sec, flagValues) : 'N/A';
 }
 
+const CHOICE_DISMISSED_KEY = 'ba.dismissedChoices.v2';
+const CHOICE_LAST_QUESTION_KEY = 'ba.lastChoiceQuestion.v2';
+
+function readJsonStorage(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJsonStorage(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    /* ignore storage quota errors */
+  }
+}
+
+const dismissedChoiceKeys = new Set(readJsonStorage(CHOICE_DISMISSED_KEY, []));
+const lastAnsweredQuestionBySec = readJsonStorage(CHOICE_LAST_QUESTION_KEY, {});
+let activeChoiceState = { key: '', answers: {}, pendingConfirmText: '' };
+
+function markChoiceHandled(msgKey, secId, signature) {
+  dismissedChoiceKeys.add(msgKey);
+  writeJsonStorage(CHOICE_DISMISSED_KEY, Array.from(dismissedChoiceKeys).slice(-100));
+  if (secId && signature) {
+    lastAnsweredQuestionBySec[secId] = signature;
+    writeJsonStorage(CHOICE_LAST_QUESTION_KEY, lastAnsweredQuestionBySec);
+  }
+}
+
+function renderSectionActionBar() {
+  const bar = document.getElementById('sectionActionBar');
+  if (!bar) return;
+  const sec = SECTIONS[activeSectionIndex];
+  if (!sec || isSending || remotePending || streamingMsg || isChatFrozen()) {
+    bar.hidden = true;
+    bar.innerHTML = '';
+    return;
+  }
+
+  const actions = [];
+  const secStatus = sectionStates[sec.id]?.status;
+  const tier1Idx = TIER1_IDS.indexOf(sec.id);
+
+  if (tier1Idx >= 0 && tier1Idx < TIER1_IDS.length - 1 && secStatus === 'completed') {
+    const nextId = TIER1_IDS[tier1Idx + 1];
+    const nextIdx = SECTIONS.findIndex((s) => s.id === nextId);
+    const nextSec = nextIdx >= 0 ? SECTIONS[nextIdx] : null;
+    if (nextSec && sectionStates[nextId]?.status !== 'locked') {
+      actions.push({
+        label: `Sang ${nextSec.num} (${nextSec.title}) →`,
+        tone: 'primary',
+        onClick: () => void selectSection(nextIdx),
+      });
+    }
+  }
+
+  if (sec.id === 'workflow' && sectionStates.workflow?.data?.workflow_md_content) {
+    const bpmnIdx = SECTIONS.findIndex((s) => s.id === 'bpmn_reference');
+    if (bpmnIdx >= 0) {
+      actions.push({
+        label: 'Xem sơ đồ BPMN',
+        tone: 'secondary',
+        onClick: () => void selectSection(bpmnIdx),
+      });
+    }
+  }
+
+  const allTier1Done = TIER1_IDS.every((id) => sectionStates[id]?.status === 'completed');
+  if (allTier1Done && featureStatus !== 'VALIDATED' && !isChatFrozen()) {
+    actions.push({
+      label: 'Chạy Validate ngay',
+      tone: 'primary',
+      onClick: () => document.getElementById('btnValidate')?.click(),
+    });
+  }
+
+  if (lastValidation && lastValidation.status === 'failed') {
+    actions.push({
+      label: 'Xem lỗi Validate cần sửa',
+      tone: 'warn',
+      onClick: () => openValidationFixModal(),
+    });
+  }
+
+  if (!actions.length) {
+    bar.hidden = true;
+    bar.innerHTML = '';
+    return;
+  }
+
+  bar.hidden = false;
+  bar.innerHTML = '';
+  actions.forEach((act) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `section-action-chip is-${act.tone}`;
+    btn.textContent = act.label;
+    btn.addEventListener('click', act.onClick);
+    bar.appendChild(btn);
+  });
+}
+
+function getChoiceAnswerState(qIdx) {
+  if (!activeChoiceState.answers[qIdx]) {
+    activeChoiceState.answers[qIdx] = { selected: new Set(), useCustom: false, customText: '' };
+  }
+  return activeChoiceState.answers[qIdx];
+}
+
+function isQuestionAnswered(ans) {
+  return Boolean(ans && (ans.selected.size > 0 || (ans.useCustom && ans.customText.trim().length > 0)));
+}
+
+function renderAgentChoiceCard() {
+  const card = document.getElementById('agentChoiceCard');
+  if (!card) return;
+  const sec = SECTIONS[activeSectionIndex];
+  const messages = (sec && chatHistories[sec.id]) || [];
+  const lastMsg = messages[messages.length - 1];
+
+  const isTier1Completed = TIER1_IDS.includes(sec.id) && sectionStates[sec.id]?.status === 'completed';
+
+  if (
+    !lastMsg ||
+    lastMsg.sender !== 'agent' ||
+    isSending ||
+    remotePending ||
+    streamingMsg ||
+    isChatFrozen()
+  ) {
+    card.hidden = true;
+    card.innerHTML = '';
+    return;
+  }
+
+  const msgKey = `${sessionId || ''}:${sec.id}:${messages.length}:${String(lastMsg.text || '').slice(0, 64)}`;
+  if (dismissedChoiceKeys.has(msgKey)) {
+    card.hidden = true;
+    card.innerHTML = '';
+    return;
+  }
+
+  let batch = extractAgentChoices(lastMsg.text);
+  if (!batch || isProceduralChoicePrompt(batch)) {
+    batch = extractFeedbackFixChoices(
+      lastMsg.text,
+      isTier1Completed ? [] : sec.flags,
+      isTier1Completed ? {} : sectionStates[sec.id]?.flagValues,
+    );
+  }
+  if (
+    !batch ||
+    isProceduralChoicePrompt(batch) ||
+    lastAnsweredQuestionBySec[sec.id] === batch.signature
+  ) {
+    card.hidden = true;
+    card.innerHTML = '';
+    return;
+  }
+
+  if (activeChoiceState.key !== msgKey) {
+    activeChoiceState = { key: msgKey, answers: {}, pendingConfirmText: '' };
+  }
+
+  const dismissCard = () => {
+    markChoiceHandled(msgKey, sec.id, batch.signature);
+    activeChoiceState.pendingConfirmText = '';
+    card.hidden = true;
+    card.innerHTML = '';
+  };
+
+  if (activeChoiceState.pendingConfirmText) {
+    card.hidden = false;
+    card.classList.remove('is-multi');
+    card.classList.add('is-single');
+    card.innerHTML = `
+      <div class="agent-choice-head">
+        <div class="agent-choice-title-wrap">
+          <strong>Bạn muốn ai thực hiện cập nhật này?</strong>
+          <small class="agent-choice-confirm-summary">${escapeHtml(activeChoiceState.pendingConfirmText)}</small>
+        </div>
+        <button type="button" class="agent-choice-close" aria-label="Ẩn khung lựa chọn" title="Ẩn khung lựa chọn">✕</button>
+      </div>
+      <div class="agent-choice-list" role="radiogroup">
+        <button type="button" class="agent-choice-opt" data-confirm-actor="agent">
+          <span class="agent-choice-num">1</span>
+          <span class="agent-choice-label">Để Agent tự làm</span>
+          <span class="agent-choice-badge">Đề xuất</span>
+        </button>
+        <button type="button" class="agent-choice-opt" data-confirm-actor="self">
+          <span class="agent-choice-num">2</span>
+          <span class="agent-choice-label">Để tôi tự làm</span>
+        </button>
+      </div>
+      <div class="agent-choice-foot">
+        <button type="button" class="agent-choice-back">← Quay lại</button>
+      </div>
+    `;
+    card.querySelector('.agent-choice-close')?.addEventListener('click', dismissCard);
+    card.querySelector('.agent-choice-back')?.addEventListener('click', () => {
+      activeChoiceState.pendingConfirmText = '';
+      renderAgentChoiceCard();
+    });
+    card.querySelector('[data-confirm-actor="agent"]')?.addEventListener('click', () => {
+      const text = activeChoiceState.pendingConfirmText;
+      dismissCard();
+      chatInput.value = text;
+      void handleSendWithAction(null, { fromChoiceCard: true });
+    });
+    card.querySelector('[data-confirm-actor="self"]')?.addEventListener('click', dismissCard);
+    return;
+  }
+
+  const questions = batch.questions;
+  const isBatch = questions.length > 1;
+  const answeredCount = questions.filter((_, idx) => isQuestionAnswered(activeChoiceState.answers[idx])).length;
+  const canSubmit = answeredCount > 0;
+  const singlePrompt = questions[0];
+  const singleAns = getChoiceAnswerState(0);
+  const allSelected =
+    !isBatch &&
+    singlePrompt.multi &&
+    singlePrompt.options.every((opt) => singleAns.selected.has(opt.value));
+
+  card.hidden = false;
+  card.classList.toggle('is-multi', isBatch || Boolean(singlePrompt.multi));
+  card.classList.toggle('is-single', !isBatch && !singlePrompt.multi);
+
+  const renderQuestionBlock = (q, qIdx) => {
+    const ans = getChoiceAnswerState(qIdx);
+    return `
+      <div class="${isBatch ? 'agent-choice-qblock' : ''}" data-q-idx="${qIdx}">
+        ${isBatch ? `<div class="agent-choice-qtitle">${qIdx + 1}. ${escapeHtml(q.question)}<small>${q.multi ? 'Chọn nhiều' : 'Chọn 1'}</small></div>` : ''}
+        <div class="agent-choice-list" role="${q.multi ? 'group' : 'radiogroup'}">
+          ${q.options
+            .map((opt, oIdx) => {
+              const isSel = ans.selected.has(opt.value);
+              return `
+                <button type="button" class="agent-choice-opt${isSel ? ' is-selected' : ''}" data-q-idx="${qIdx}" data-opt-idx="${oIdx}" aria-pressed="${isSel}">
+                  <span class="agent-choice-num">${oIdx + 1}</span>
+                  <span class="agent-choice-label">${escapeHtml(opt.label)}</span>
+                  ${opt.recommended ? '<span class="agent-choice-badge">Đề xuất</span>' : ''}
+                  <span class="agent-choice-check" aria-hidden="true">${isSel ? '✓' : ''}</span>
+                </button>
+              `;
+            })
+            .join('')}
+          <div class="agent-choice-other${ans.useCustom ? ' is-selected' : ''}" data-q-idx="${qIdx}">
+            <button type="button" class="agent-choice-other-toggle" data-q-idx="${qIdx}">
+              <span class="agent-choice-num">${q.options.length + 1}</span>
+              <span>Khác</span>
+            </button>
+            <input type="text" class="agent-choice-other-input" data-q-idx="${qIdx}" value="${escapeHtml(ans.customText)}" placeholder="Nhập lựa chọn hoặc yêu cầu khác của bạn…" />
+          </div>
+        </div>
+      </div>
+    `;
+  };
+
+  card.innerHTML = `
+    <div class="agent-choice-head">
+      <div class="agent-choice-title-wrap">
+        <strong>${isBatch ? `Có ${questions.length} quyết định nghiệp vụ cần chốt` : escapeHtml(singlePrompt.question)}</strong>
+        <small>${isBatch ? 'Chọn phương án cho từng câu rồi gửi 1 lần' : (singlePrompt.multi ? 'Có thể chọn nhiều phương án' : 'Chọn 1 phương án')}</small>
+      </div>
+      <button type="button" class="agent-choice-close" aria-label="Ẩn khung lựa chọn" title="Ẩn khung lựa chọn">✕</button>
+    </div>
+    <div class="${isBatch ? 'agent-choice-batch' : ''}">
+      ${questions.map((q, idx) => renderQuestionBlock(q, idx)).join('')}
+    </div>
+    <div class="agent-choice-foot">
+      ${!isBatch && singlePrompt.multi ? `<button type="button" class="agent-choice-select-all">${allSelected ? 'Bỏ chọn tất cả' : 'Chọn tất cả'}</button>` : ''}
+      <button type="button" class="agent-choice-skip">Bỏ qua</button>
+      <button type="button" class="agent-choice-submit"${canSubmit ? '' : ' disabled'}>${isBatch ? `Gửi ${answeredCount}/${questions.length} lựa chọn →` : 'Gửi lựa chọn →'}</button>
+    </div>
+  `;
+
+  const syncSubmitState = () => {
+    const submitBtn = card.querySelector('.agent-choice-submit');
+    if (!submitBtn) return;
+    const count = questions.filter((_, idx) => isQuestionAnswered(activeChoiceState.answers[idx])).length;
+    submitBtn.disabled = count === 0;
+    if (isBatch) submitBtn.textContent = `Gửi ${count}/${questions.length} lựa chọn →`;
+  };
+
+  const submitChoice = () => {
+    const msg = isBatch
+      ? formatBatchSubmission(questions, activeChoiceState.answers)
+      : formatChoiceSubmission(
+          Array.from(getChoiceAnswerState(0).selected),
+          getChoiceAnswerState(0).useCustom ? getChoiceAnswerState(0).customText : '',
+        );
+    if (!msg) return;
+    if (!isBatch && isLocalDismissChoice(msg)) {
+      dismissCard();
+      return;
+    }
+    if (!isBatch && isUpdateChoice(msg)) {
+      activeChoiceState.pendingConfirmText = msg;
+      renderAgentChoiceCard();
+      return;
+    }
+    dismissCard();
+    chatInput.value = msg;
+    void handleSendWithAction(null, { fromChoiceCard: true });
+  };
+
+  card.querySelector('.agent-choice-close')?.addEventListener('click', dismissCard);
+  card.querySelector('.agent-choice-skip')?.addEventListener('click', dismissCard);
+  card.querySelector('.agent-choice-submit')?.addEventListener('click', submitChoice);
+  card.querySelector('.agent-choice-select-all')?.addEventListener('click', () => {
+    const ans = getChoiceAnswerState(0);
+    if (allSelected) ans.selected.clear();
+    else ans.selected = new Set(singlePrompt.options.map((opt) => opt.value));
+    renderAgentChoiceCard();
+  });
+
+  card.querySelectorAll('.agent-choice-opt').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const qIdx = Number(btn.dataset.qIdx);
+      const oIdx = Number(btn.dataset.optIdx);
+      const q = questions[qIdx];
+      const opt = q?.options?.[oIdx];
+      if (!opt) return;
+      const ans = getChoiceAnswerState(qIdx);
+      if (q.multi) {
+        if (ans.selected.has(opt.value)) ans.selected.delete(opt.value);
+        else ans.selected.add(opt.value);
+      } else {
+        ans.selected = new Set([opt.value]);
+        ans.useCustom = false;
+      }
+      renderAgentChoiceCard();
+    });
+  });
+
+  card.querySelectorAll('.agent-choice-other-toggle').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const qIdx = Number(btn.dataset.qIdx);
+      const q = questions[qIdx];
+      const ans = getChoiceAnswerState(qIdx);
+      if (q?.multi) {
+        ans.useCustom = !ans.useCustom;
+      } else {
+        ans.selected.clear();
+        ans.useCustom = true;
+      }
+      renderAgentChoiceCard();
+      card.querySelector(`.agent-choice-other-input[data-q-idx="${qIdx}"]`)?.focus();
+    });
+  });
+
+  card.querySelectorAll('.agent-choice-other-input').forEach((input) => {
+    const qIdx = Number(input.dataset.qIdx);
+    const q = questions[qIdx];
+    const otherWrap = card.querySelector(`.agent-choice-other[data-q-idx="${qIdx}"]`);
+    input.addEventListener('focus', () => {
+      const ans = getChoiceAnswerState(qIdx);
+      if (!q?.multi && ans.selected.size > 0) {
+        ans.selected.clear();
+        card.querySelectorAll(`.agent-choice-opt[data-q-idx="${qIdx}"]`).forEach((el) => el.classList.remove('is-selected'));
+        card.querySelectorAll(`.agent-choice-opt[data-q-idx="${qIdx}"] .agent-choice-check`).forEach((el) => { el.textContent = ''; });
+      }
+      ans.useCustom = true;
+      otherWrap?.classList.add('is-selected');
+      syncSubmitState();
+    });
+    input.addEventListener('input', (e) => {
+      const ans = getChoiceAnswerState(qIdx);
+      ans.useCustom = true;
+      ans.customText = e.target.value;
+      otherWrap?.classList.add('is-selected');
+      syncSubmitState();
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        submitChoice();
+      }
+    });
+  });
+}
+
+function closeValidationFixModal() {
+  const overlay = document.getElementById('validationFixModal');
+  if (!overlay) return;
+  overlay.hidden = true;
+  overlay.innerHTML = '';
+}
+
+function runAgentFixForSection(idx, errors) {
+  closeValidationFixModal();
+  const targetSec = SECTIONS[idx];
+  if (!targetSec) return;
+  selectSection(idx);
+  const promptText = buildAgentFixPrompt(targetSec, errors);
+  if (!promptText) return;
+  setTimeout(() => {
+    chatInput.value = promptText;
+    void handleSendWithAction();
+  }, 80);
+}
+
+function openValidationFixModal() {
+  const overlay = document.getElementById('validationFixModal');
+  if (!overlay) return;
+  const grouped = groupValidationFindings(lastValidation, SECTIONS);
+  if (!grouped.isFailed || !grouped.failedCount) {
+    closeValidationFixModal();
+    return;
+  }
+
+  const cardsHtml = grouped.errorSections.map(({ sec, index, errors }) => {
+    const itemsHtml = errors.map((err) => `
+      <div class="val-fix-item">
+        <strong>${escapeHtml(err.check_id || '')} ${escapeHtml(err.name || 'Lỗi Validation')}</strong>
+        <span>${escapeHtml(err.detail || '')}</span>
+        ${err.suggestion ? `<small>Gợi ý: ${escapeHtml(err.suggestion)}</small>` : ''}
+      </div>
+    `).join('');
+    return `
+      <section class="val-fix-section-card" data-val-sec="${sec.id}">
+        <div class="val-fix-section-head">
+          <div class="val-fix-section-title">
+            <span class="val-fix-sec-code">${escapeHtml(sec.num)}</span>
+            <span>${escapeHtml(sec.title)}</span>
+            <span class="section-val-err">${errors.length} lỗi</span>
+          </div>
+          <div class="val-fix-actions">
+            <button type="button" class="val-banner-btn" data-fix-manual="${index}">Tự sửa tay</button>
+            <button type="button" class="val-banner-btn is-primary" data-fix-agent="${index}">Sửa cùng Agent →</button>
+          </div>
+        </div>
+        ${itemsHtml}
+      </section>
+    `;
+  }).join('');
+
+  const allWarnings = (lastValidation && Array.isArray(lastValidation.warnings)) ? lastValidation.warnings : [];
+  const warnHtml = allWarnings.length ? `
+    <details class="val-fix-warnings">
+      <summary>Cảnh báo không chặn Export (${allWarnings.length})</summary>
+      <div class="val-fix-warn-list">
+        ${allWarnings.map((w) => `<div class="val-fix-warn-item"><strong>${escapeHtml(w.check_id || '')}</strong> ${escapeHtml(w.detail || w.name || '')}</div>`).join('')}
+      </div>
+    </details>
+  ` : '';
+
+  overlay.hidden = false;
+  overlay.innerHTML = `
+    <div class="val-fix-modal">
+      <div class="val-fix-head">
+        <div>
+          <h3>Validation chưa đạt — ${grouped.failedCount} lỗi bắt buộc cần sửa</h3>
+          <p>Nên sửa lần lượt theo thứ tự phụ thuộc (Business Rules → Workflow → User Stories), sau đó chạy lại Validate.</p>
+        </div>
+        <button type="button" class="val-fix-close" aria-label="Đóng">✕</button>
+      </div>
+      <div class="val-fix-body">
+        ${cardsHtml}
+        ${warnHtml}
+      </div>
+      <div class="val-fix-foot">
+        <button type="button" class="val-banner-btn val-fix-dismiss">Đóng</button>
+        <button type="button" class="val-banner-btn is-primary val-fix-revalidate">Chạy lại Validate</button>
+      </div>
+    </div>
+  `;
+
+  overlay.onclick = (e) => {
+    if (e.target === overlay) closeValidationFixModal();
+  };
+  overlay.querySelector('.val-fix-close')?.addEventListener('click', closeValidationFixModal);
+  overlay.querySelector('.val-fix-dismiss')?.addEventListener('click', closeValidationFixModal);
+  overlay.querySelector('.val-fix-revalidate')?.addEventListener('click', () => {
+    closeValidationFixModal();
+    void handleValidate();
+  });
+
+  overlay.querySelectorAll('[data-fix-manual]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const idx = Number(btn.dataset.fixManual);
+      closeValidationFixModal();
+      selectSection(idx);
+    });
+  });
+  overlay.querySelectorAll('[data-fix-agent]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const idx = Number(btn.dataset.fixAgent);
+      const sec = SECTIONS[idx];
+      const bucket = sec ? grouped.bySection.get(sec.id) : null;
+      runAgentFixForSection(idx, bucket ? bucket.errors : []);
+    });
+  });
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    const overlay = document.getElementById('validationFixModal');
+    if (overlay && !overlay.hidden) closeValidationFixModal();
+  }
+});
+
+function renderValidationFixBanner() {
+  const banner = document.getElementById('validationFixBanner');
+  if (!banner) return;
+  const grouped = groupValidationFindings(lastValidation, SECTIONS);
+  if (!grouped.isFailed || !grouped.failedCount || isChatFrozen()) {
+    banner.hidden = true;
+    banner.innerHTML = '';
+    return;
+  }
+
+  const sec = SECTIONS[activeSectionIndex];
+  const bucket = sec ? grouped.bySection.get(sec.id) : null;
+  const localErrors = bucket ? bucket.errors : [];
+
+  banner.hidden = false;
+  if (localErrors.length > 0) {
+    const first = localErrors[0];
+    banner.innerHTML = `
+      <div class="val-banner-info">
+        <span class="val-banner-pill">${localErrors.length} lỗi VA ở ${escapeHtml(sec.num)}</span>
+        <span class="val-banner-text" title="${escapeHtml(first.detail || '')}">${escapeHtml(first.detail || first.name || '')}</span>
+      </div>
+      <div class="val-banner-actions">
+        <button type="button" class="val-banner-btn is-primary" data-banner-fix>Sửa cùng Agent</button>
+        <button type="button" class="val-banner-btn" data-banner-all>Xem tất cả (${grouped.failedCount})</button>
+        <button type="button" class="val-banner-btn" data-banner-reval>Validate lại</button>
+      </div>
+    `;
+    banner.querySelector('[data-banner-fix]')?.addEventListener('click', () => {
+      runAgentFixForSection(activeSectionIndex, localErrors);
+    });
+  } else {
+    banner.innerHTML = `
+      <div class="val-banner-info">
+        <span class="val-banner-pill">Validation chưa đạt</span>
+        <span class="val-banner-text">Còn ${grouped.failedCount} lỗi bắt buộc ở section khác cần xử lý.</span>
+      </div>
+      <div class="val-banner-actions">
+        <button type="button" class="val-banner-btn is-primary" data-banner-all>Xem danh sách lỗi (${grouped.failedCount})</button>
+        <button type="button" class="val-banner-btn" data-banner-reval>Validate lại</button>
+      </div>
+    `;
+  }
+  banner.querySelector('[data-banner-all]')?.addEventListener('click', openValidationFixModal);
+  banner.querySelector('[data-banner-reval]')?.addEventListener('click', () => void handleValidate());
+}
+
 function renderChatMessages() {
   const sec = SECTIONS[activeSectionIndex];
   const messages = chatHistories[sec.id] || [];
@@ -1528,7 +2107,7 @@ function renderChatMessages() {
     row.className = `message-row ${msg.sender === 'user' ? 'user' : ''} ${msg === streamingMsg ? 'is-streaming' : ''} animate-fadeIn`;
     const body =
       msg.sender === 'agent'
-        ? `<div class="bubble bubble-md">${formatChatMarkdown(msg.text)}</div>`
+        ? `<div class="bubble bubble-md">${formatChatMarkdown(stripAgentChoicesTag(msg.text))}</div>`
         : `<div class="bubble">${escapeHtml(msg.text)}</div>`;
     row.innerHTML = `
       <div class="avatar ${msg.sender === 'user' ? 'user-avatar' : 'agent'}">
@@ -1544,6 +2123,9 @@ function renderChatMessages() {
     showTypingIndicator();
   }
   chatStream.scrollTop = chatStream.scrollHeight;
+  renderSectionActionBar();
+  renderAgentChoiceCard();
+  renderValidationFixBanner();
 }
 
 // ── Remote turns: a turn sent from another tab / user / script ─
@@ -1591,6 +2173,8 @@ async function watchServerTurn() {
     remotePending = pending;
     if (pending) showTypingIndicator();
     else removeTypingIndicator();
+    renderSectionActionBar();
+    renderAgentChoiceCard();
   }
 }
 
@@ -1601,7 +2185,7 @@ let typeTimer = null;
 function updateStreamingBubble() {
   const bubble = chatStream.querySelector('.message-row.is-streaming .bubble');
   if (!bubble || !streamingMsg) return renderChatMessages();
-  bubble.innerHTML = formatChatMarkdown(streamingMsg.text);
+  bubble.innerHTML = formatChatMarkdown(stripAgentChoicesTag(streamingMsg.text));
   chatStream.scrollTop = chatStream.scrollHeight;
 }
 
@@ -1921,8 +2505,8 @@ function renderWorkspace() {
       <div class="field-group">
         <label class="field-label">Artifact</label>
         <div class="ws-meta-row">
-          <span class="ws-meta-pill">${escapeHtml(data.artifact_id || 'WF-…')}</span>
-          <span class="ws-meta-pill">v${escapeHtml(data.version || '—')}</span>
+          <span class="ws-meta-pill">${escapeHtml(data.artifact_id && String(data.artifact_id).length <= 64 && !/[{}\n]/.test(String(data.artifact_id)) ? data.artifact_id : 'WF-…')}</span>
+          <span class="ws-meta-pill">v${escapeHtml(data.version && String(data.version).length <= 24 && !/[{}\n]/.test(String(data.version)) ? data.version : '1.0')}</span>
         </div>
       </div>
       <div class="field-group">
@@ -2342,12 +2926,16 @@ async function refreshFeatureState() {
   updateGlobalProgress();
 }
 
-async function handleSendWithAction(action = null, { internalStart = false } = {}) {
+async function handleSendWithAction(action = null, { internalStart = false, fromChoiceCard = false } = {}) {
   const text = internalStart ? '__INTERNAL_BA_START__' : chatInput.value.trim();
   if (!text || isSending) return;
   if (isChatFrozen() && action !== 'validate') return;
 
   const sec = SECTIONS[activeSectionIndex];
+  if (!internalStart && !fromChoiceCard && sec && lastAnsweredQuestionBySec[sec.id]) {
+    delete lastAnsweredQuestionBySec[sec.id];
+    writeJsonStorage(CHOICE_LAST_QUESTION_KEY, lastAnsweredQuestionBySec);
+  }
   let fullPayloadText = text;
   if (!internalStart && pendingEdits.length > 0) {
     const preambleLines = pendingEdits.map(edit => {
@@ -2372,15 +2960,20 @@ async function handleSendWithAction(action = null, { internalStart = false } = {
     renderChatHeader();
   }
 
+  const allowCancel = !internalStart;
   isSending = true;
-  setSendBusy(true);
+  activeChatAbortController = allowCancel ? new AbortController() : null;
+  setSendBusy(true, { allowCancel });
   syncControlButtons();
   showTypingIndicator();
   receivedStateUpdate = false;
 
   let currentAgentMsg = null;
   try {
-    await sendChatMessage(sessionId, fullPayloadText, sec.id, { action, assets: referenceAssets, internalStart }, {
+    await sendChatMessage(sessionId, fullPayloadText, sec.id, { action, assets: referenceAssets, internalStart, signal: activeChatAbortController?.signal }, {
+      onProgress: (p) => {
+        if (p && p.label) updateTypingIndicator(p.label);
+      },
       onMessage: (data) => {
         removeTypingIndicator();
         if (!currentAgentMsg) {
@@ -2421,7 +3014,19 @@ async function handleSendWithAction(action = null, { internalStart = false } = {
           }
           injectValidationReport(sec.id, currentAgentMsg);
           renderChatMessages();
+          if (lastValidation && lastValidation.status === 'failed') {
+            openValidationFixModal();
+          }
         }
+      },
+      onCancelled: () => {
+        removeTypingIndicator();
+        finishTyping();
+        chatHistories[sec.id].push({
+          sender: 'agent',
+          text: '⏹ Đã dừng lượt chat theo yêu cầu của bạn.',
+        });
+        renderChatMessages();
       },
       onError: async (err) => {
         removeTypingIndicator();
@@ -2453,6 +3058,7 @@ async function handleSendWithAction(action = null, { internalStart = false } = {
       },
     });
   } finally {
+    activeChatAbortController = null;
     referenceAssets = [];
     setAttachLabel('Ảnh tham chiếu');
     isSending = false;
@@ -2460,6 +3066,8 @@ async function handleSendWithAction(action = null, { internalStart = false } = {
     if (!remotePending) removeTypingIndicator();
     setSendBusy(false);
     syncControlButtons();
+    renderSectionActionBar();
+    renderAgentChoiceCard();
   }
 }
 
@@ -2488,25 +3096,73 @@ function followAgentToNextSection(sectionId, wasCompleted) {
 
 // ── Typing Indicator ─────────────────────────────────────────
 
-function showTypingIndicator() {
-  const existing = chatStream.querySelector('.typing-row');
-  if (existing) return;
+let typingElapsedTimer = null;
+let typingStartedAt = 0;
 
+function formatElapsedSeconds(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  return `${m}m ${rem}s`;
+}
+
+function showTypingIndicator(label = 'Đang phân tích yêu cầu...') {
+  const existing = chatStream.querySelector('.typing-row');
+  if (existing) {
+    updateTypingIndicator(label);
+    return;
+  }
+
+  typingStartedAt = Date.now();
   const row = document.createElement('div');
   row.className = 'message-row typing-row animate-fadeIn';
   row.innerHTML = `
     <div class="avatar agent">BA</div>
     <div class="bubble typing-indicator">
-      <div class="typing-dot"></div>
-      <div class="typing-dot"></div>
-      <div class="typing-dot"></div>
+      <div class="typing-dots">
+        <div class="typing-dot"></div>
+        <div class="typing-dot"></div>
+        <div class="typing-dot"></div>
+      </div>
+      <span class="typing-status-text"></span>
+      <span class="typing-elapsed">0s</span>
+      ${activeChatAbortController ? '<button type="button" class="typing-cancel-btn" title="Dừng phản hồi">Hủy</button>' : ''}
     </div>
   `;
+  row.querySelector('.typing-status-text').textContent = label;
+  row.querySelector('.typing-cancel-btn')?.addEventListener('click', cancelActiveChat);
   chatStream.appendChild(row);
+  chatStream.scrollTop = chatStream.scrollHeight;
+
+  if (typingElapsedTimer) clearInterval(typingElapsedTimer);
+  typingElapsedTimer = setInterval(() => {
+    const elapsedEl = chatStream.querySelector('.typing-row .typing-elapsed');
+    if (!elapsedEl) {
+      clearInterval(typingElapsedTimer);
+      typingElapsedTimer = null;
+      return;
+    }
+    elapsedEl.textContent = formatElapsedSeconds(Date.now() - typingStartedAt);
+  }, 1000);
+}
+
+function updateTypingIndicator(label) {
+  const row = chatStream.querySelector('.typing-row');
+  if (!row) {
+    showTypingIndicator(label);
+    return;
+  }
+  const statusEl = row.querySelector('.typing-status-text');
+  if (statusEl && label) statusEl.textContent = label;
   chatStream.scrollTop = chatStream.scrollHeight;
 }
 
 function removeTypingIndicator() {
+  if (typingElapsedTimer) {
+    clearInterval(typingElapsedTimer);
+    typingElapsedTimer = null;
+  }
   const el = chatStream.querySelector('.typing-row');
   if (el) el.remove();
 }

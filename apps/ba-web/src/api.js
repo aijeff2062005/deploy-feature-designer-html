@@ -198,12 +198,25 @@ export async function getChatHistory(sessionId, selectSection = 'feature_definit
  * @returns {Promise<void>}
  */
 export async function sendChatMessage(sessionId, message, sectionId, options = {}, handlers = {}) {
-  const { action = null, assets = [], internalStart = false } = options;
+  const { action = null, assets = [], internalStart = false, signal: externalSignal = null } = options;
   // OQ sync runs one artifact update per question, so a batch of answers may
   // legitimately take longer than the normal chat request timeout.
   const timeoutMs = options.timeoutMs ?? (sectionId === 'open_questions' ? 960000 : 330000);
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  let cancelledByUser = false;
+  const onExternalAbort = () => {
+    cancelledByUser = true;
+    controller.abort();
+  };
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      cancelledByUser = true;
+      controller.abort();
+    } else {
+      externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+  }
   let streamDone = false;
   let receivedAgentMessage = false;
   try {
@@ -273,6 +286,9 @@ export async function sendChatMessage(sessionId, message, sectionId, options = {
           const parsed = JSON.parse(data);
 
           switch (eventType) {
+            case 'chat.progress':
+              handlers.onProgress?.(parsed);
+              break;
             case 'chat.message':
               if (typeof parsed.text === 'string' && parsed.text.trim()) {
                 receivedAgentMessage = true;
@@ -345,13 +361,16 @@ export async function sendChatMessage(sessionId, message, sectionId, options = {
     }
 
   } catch (err) {
-    if (err.name === 'AbortError') {
+    if (err.name === 'AbortError' && cancelledByUser) {
+      await handlers.onCancelled?.();
+    } else if (err.name === 'AbortError') {
       await handlers.onError?.(new Error(`Hết thời gian chờ phản hồi (>${Math.ceil(timeoutMs / 60000)} phút). Vui lòng thử lại.`));
     } else {
       await handlers.onError?.(err);
     }
   } finally {
     clearTimeout(timeoutId);
+    if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
   }
 }
 
