@@ -16,6 +16,23 @@ class WorkflowHandoffMapping(BaseModel):
     )
 
 
+class WorkflowPatch(BaseModel):
+    """Incremental patch to apply to CURRENT WORKFLOW markdown without rewriting the whole document."""
+
+    find: str | None = Field(
+        None,
+        description="Exact substring/row/block in CURRENT WORKFLOW to replace. Omit when appending to a section.",
+    )
+    replace: str = Field(
+        "",
+        description="Replacement text (or markdown table rows to append when append_to_section is set).",
+    )
+    append_to_section: str | None = Field(
+        None,
+        description="Optional heading name (e.g. 'Exception Flows', 'End States', 'Alternative Flows', 'Main Flow') to append replace lines to.",
+    )
+
+
 class WorkflowData(BaseModel):
     """Delta output from WF extractor — merge vào artifacts.workflow."""
 
@@ -50,5 +67,12 @@ class WorkflowData(BaseModel):
             "Use the exact ID in the returned workflow markdown and preserve exit_state_id. "
             "If distinct confirmed branches share one broad End State, split it into branch-specific End State rows with unused IDs; do not ask the user to provide technical IDs. "
             "Leave mappings unset only when the business destination/branch is genuinely ambiguous."
+        ),
+    )
+    workflow_patches: list[WorkflowPatch] | None = Field(
+        None,
+        description=(
+            "Incremental delta patches to apply on top of CURRENT WORKFLOW. "
+            "Prefer this over rewriting full workflow_md_content when modifying/adding a few steps, BR refs, exceptions, or end states."
         ),
     )

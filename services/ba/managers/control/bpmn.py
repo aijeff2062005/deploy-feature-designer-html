@@ -132,6 +132,38 @@ def _clean_end_state_id(value: str) -> str:
     return re.sub(r"^[*_`]+|[*_`]+$", "", str(value or "").strip()).strip()
 
 
+def _extract_first_step_table(content: str) -> str:
+    """Fallback: extract the first ``Step | Actor | Action`` table outside secondary sections."""
+    skip_section = False
+    table_lines: list[str] = []
+    lines = content.splitlines()
+    for i, raw in enumerate(lines):
+        stripped = raw.strip()
+        heading_match = re.match(r"^#{1,3}\s+(.+)$", stripped)
+        if heading_match:
+            if table_lines:
+                break
+            title = heading_match.group(1).lower()
+            skip_section = any(
+                key in title
+                for key in ("alternative flow", "exception flow", "end state")
+            )
+            continue
+        if skip_section:
+            continue
+        if stripped.startswith("|"):
+            if not table_lines:
+                if _is_table_header(lines, i):
+                    cells = [c.lower() for c in _table_cells(stripped)]
+                    if cells and "step" in cells[0] and any("actor" in c for c in cells):
+                        table_lines.append(raw)
+            else:
+                table_lines.append(raw)
+        elif table_lines:
+            break
+    return "\n".join(table_lines)
+
+
 def parse_workflow_steps(workflow_md: str) -> dict[str, Any]:
     """Extract main-flow steps, exceptions, and end states from markdown.
 
@@ -140,7 +172,12 @@ def parse_workflow_steps(workflow_md: str) -> dict[str, Any]:
     content = str(workflow_md or "")
     main_section = _heading_section(content, "Main Flow")
     has_section_headings = any(re.match(r"^#{1,3}\s+\S", line.strip()) for line in content.splitlines())
-    main = main_section if main_section is not None else ("" if has_section_headings else content)
+    if main_section is not None:
+        main = main_section
+    elif has_section_headings:
+        main = _extract_first_step_table(content)
+    else:
+        main = content
     steps: list[dict[str, str]] = []
     main_lines = main.splitlines()
     for line_index, raw in enumerate(main_lines):

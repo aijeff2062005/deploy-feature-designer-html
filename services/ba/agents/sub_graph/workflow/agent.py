@@ -24,10 +24,11 @@ from agents.sub_graph.shared.semantic_flags import (
     empty_evaluation_response,
 )
 from agents.sub_graph.shared.discussion_tools import discussion_tools
-from agents.sub_graph.workflow.schemas import WorkflowData
+from agents.sub_graph.shared.choices_prompt import USER_CHOICES_INSTRUCTION
+from agents.sub_graph.workflow.schemas import WorkflowData, WorkflowPatch
 from callbacks.filter_history import create_history_filter
 from callbacks.inject_context import insert_context
-from config.model_config import base_model
+from config.model_config import base_model, fast_model
 from utils.utils import parse_str_to_dict
 
 from google.adk.workflow import Workflow
@@ -62,10 +63,69 @@ def _preserve_omitted_workflows(previous: str, updated: str) -> tuple[str, list[
 
 
 def _sanitize_workflow_markdown(text: str) -> str:
-    """Normalize LaTeX arrow artifacts (including JSON-escaped \\r + ightarrow) to Unicode →."""
+    """Normalize LaTeX arrow artifacts, strip leaked FD context headers, and ensure Main Flow heading."""
     cleaned = re.sub(r"\$\s*(?:\\rightarrow|[\r\s]*ightarrow)\s*\$", "→", text)
     cleaned = re.sub(r"(?:\\rightarrow|\bightarrow\b)", "→", cleaned)
+    # Strip accidentally copied Feature Definition prompt block at top of workflow markdown.
+    cleaned = re.sub(
+        r"(?is)^\s*===\s*FEATURE DEFINITION\s*===.*?(?=\n#{1,3}\s+|\Z)",
+        "",
+        cleaned,
+    ).lstrip()
+    # If there is a Step|Actor|Action table without a Main Flow heading, insert ## Main Flow above it.
+    if not re.search(r"(?im)^#{1,3}\s+.*main\s+flow", cleaned):
+        table_match = re.search(
+            r"(?im)^(\|\s*Step\s*\|\s*Actor\s*\|[^\n]*\n)", cleaned
+        )
+        if table_match:
+            before = cleaned[: table_match.start()]
+            # Replace an adjacent non-standard heading (e.g. ### WF-F6: ...) if right above the table.
+            before = re.sub(r"(?im)^#{1,3}\s+[^\n]+\n\s*\Z", "", before)
+            cleaned = f"{before}## Main Flow\n\n{cleaned[table_match.start():]}".lstrip()
     return cleaned
+
+
+def _apply_workflow_patches(
+    previous: str, patches: list[WorkflowPatch]
+) -> tuple[str, bool]:
+    """Apply incremental find/replace or section-append patches onto existing workflow markdown."""
+    updated = previous
+    changed = False
+    for patch in patches:
+        replacement = _sanitize_workflow_markdown(patch.replace or "")
+        if patch.find:
+            target = patch.find
+            if target in updated:
+                next_text = updated.replace(target, replacement, 1)
+                if next_text != updated:
+                    updated = next_text
+                    changed = True
+                continue
+        if patch.append_to_section and replacement.strip():
+            section_name = re.escape(patch.append_to_section.strip())
+            heading_re = re.compile(
+                rf"(?im)^(#{{1,3}}\s+[^\n]*{section_name}[^\n]*\n)"
+            )
+            match = heading_re.search(updated)
+            if match:
+                next_heading = re.search(
+                    r"(?m)^#{1,3}\s+", updated[match.end() :]
+                )
+                insert_at = (
+                    match.end() + next_heading.start()
+                    if next_heading
+                    else len(updated)
+                )
+                before = updated[:insert_at].rstrip()
+                after = updated[insert_at:].lstrip("\n")
+                addition = replacement.strip()
+                updated = (
+                    f"{before}\n{addition}\n\n{after}"
+                    if after
+                    else f"{before}\n{addition}\n"
+                )
+                changed = True
+    return updated, changed
 
 
 async def wf_merge_callback(
@@ -89,19 +149,52 @@ async def wf_merge_callback(
     previous_content = str(wf.get("workflow_md_content") or "")
     preserved: list[str] = []
     content_changed = False
-    if parsed.workflow_md_content and parsed.workflow_md_content.strip():
+    if parsed.workflow_patches and previous_content.strip():
+        patched_content, patch_changed = _apply_workflow_patches(
+            previous_content, parsed.workflow_patches
+        )
+        if patch_changed:
+            wf["workflow_md_content"] = patched_content
+            content_changed = True
+    elif parsed.workflow_md_content and parsed.workflow_md_content.strip():
+        from managers.control.bpmn import _heading_section, parse_workflow_steps
+
         sanitized_md = _sanitize_workflow_markdown(parsed.workflow_md_content.strip())
         updated_content, preserved = _preserve_omitted_workflows(
             previous_content, sanitized_md
         )
+        old_parsed = parse_workflow_steps(previous_content)
+        new_parsed = parse_workflow_steps(updated_content)
+        if len(old_parsed.get("steps") or []) >= 3 and len(new_parsed.get("steps") or []) == 0:
+            # Guard against destructive full-content overwrites that lose Main Flow steps.
+            updated_content = previous_content
+        else:
+            prev_exc = _heading_section(previous_content, "Exception Flows")
+            if prev_exc and prev_exc.strip() and "exception" not in updated_content.lower():
+                exc_block = f"## Exception Flows\n{prev_exc.strip()}"
+                end_match = re.search(r"(?im)^#{1,3}\s+.*end\s+states", updated_content)
+                if end_match:
+                    updated_content = (
+                        updated_content[: end_match.start()].rstrip()
+                        + f"\n\n{exc_block}\n\n"
+                        + updated_content[end_match.start() :]
+                    )
+                else:
+                    updated_content = updated_content.rstrip() + f"\n\n{exc_block}\n"
         wf["workflow_md_content"] = updated_content
         content_changed = updated_content != previous_content
     if parsed.artifact_id:
-        wf["artifact_id"] = parsed.artifact_id
+        aid = parsed.artifact_id.strip()
+        if 1 <= len(aid) <= 64 and "{" not in aid and "}" not in aid and "\n" not in aid:
+            wf["artifact_id"] = aid
     if parsed.version:
-        wf["version"] = parsed.version
+        ver = parsed.version.strip()
+        if len(ver) <= 24 and re.fullmatch(r"[vV]?\d+(?:\.\d+){0,2}(?:-[A-Za-z0-9._-]+)?", ver):
+            wf["version"] = ver.lstrip("vV") or "1.0"
     if parsed.workflow_md_path:
-        wf["workflow_md_path"] = parsed.workflow_md_path
+        wpath = parsed.workflow_md_path.strip()
+        if len(wpath) <= 200 and "{" not in wpath and "\n" not in wpath:
+            wf["workflow_md_path"] = wpath
     artifacts["workflow"] = wf
     mapping_changed = False
     if parsed.handoff_mappings:
@@ -160,7 +253,41 @@ async def wf_merge_callback(
 
 async def wf_extractor_inject(
     callback_context: CallbackContext, llm_request: LlmRequest
-) -> None:
+) -> LlmResponse | None:
+    # Fast-path direct ingest when user pastes a complete structured Markdown workflow table.
+    user_text = ""
+    for content in reversed(llm_request.contents or []):
+        if getattr(content, "role", None) == "user":
+            user_text = "\n".join(
+                str(getattr(part, "text", "") or "")
+                for part in (getattr(content, "parts", None) or [])
+                if getattr(part, "text", None)
+            ).strip()
+            if user_text:
+                break
+    if user_text and re.search(r"(?im)^\|\s*Step\s*\|\s*Actor\s*\|", user_text):
+        from managers.control.bpmn import parse_workflow_steps
+
+        sanitized = _sanitize_workflow_markdown(user_text)
+        parsed_steps = parse_workflow_steps(sanitized)
+        if len(parsed_steps.get("steps") or []) >= 3:
+            id_match = re.search(
+                r"(?im)^#{1,3}[^\n]*\b(WF-[A-Z0-9]+(?:-[A-Z0-9]+)*)\b", sanitized
+            )
+            artifact_id = id_match.group(1).upper() if id_match else None
+            payload = WorkflowData(
+                artifact_id=artifact_id,
+                workflow_md_content=sanitized,
+            ).model_dump_json()
+            resp = LlmResponse(
+                content=types.Content(
+                    role="model",
+                    parts=[types.Part(text=payload)],
+                )
+            )
+            await wf_merge_callback(callback_context, resp)
+            return resp
+
     wf = trim_workflow(callback_context.state.get("artifacts", {}).get("workflow", {}))
     br = trim_business_rules(
         callback_context.state.get("artifacts", {}).get("business_rules", [])
@@ -174,6 +301,7 @@ async def wf_extractor_inject(
         f"=== BUSINESS RULES ===\n{json.dumps(br, ensure_ascii=False)}\n\n"
         f"=== CURRENT WORKFLOW ===\n{json.dumps(wf, ensure_ascii=False)}",
     )
+    return None
 
 
 async def wf_flags_before(
@@ -345,13 +473,15 @@ _wf_flags_instruction = (
 
 _wf_extractor = LlmAgent(
     name="wf_extractor",
-    model=base_model,
+    model=fast_model,
     instruction=(
         "Trích xuất/cập nhật workflow markdown NGẮN GỌN cho **một** luồng/story tại một thời điểm. "
-        "Artifact workflow có thể chứa NHIỀU workflow. Khi sửa một WF-ID, phải giữ nguyên đầy đủ mọi WF-ID khác và mọi bước/BR Ref hiện có; không được thay toàn bộ artifact bằng riêng luồng đang sửa. Trả lại toàn bộ nội dung workflow sau khi merge. "
+        "CHỈ TRẢ PHẦN THAY ĐỔI (DELTA): Nếu tin nhắn user KHÔNG thêm/sửa bước, BR ref, exception hay end state nào (chỉ hỏi, xác nhận, hoặc yêu cầu xem preview), trả `{}` (để trống `workflow_md_content` và `workflow_patches`). "
+        "Nếu `CURRENT WORKFLOW` đã có nội dung và user chỉ sửa/thêm vài dòng, BR ref, exception hoặc end state, HÃY DÙNG `workflow_patches` (find/replace hoặc append_to_section) thay vì viết lại toàn bộ `workflow_md_content`. Chỉ trả full `workflow_md_content` khi tạo mới từ đầu hoặc tái cấu trúc phần lớn tài liệu. "
+        "Artifact workflow có thể chứa NHIỀU workflow. Khi sửa một WF-ID bằng `workflow_md_content`, phải giữ nguyên đầy đủ mọi WF-ID khác và mọi bước/BR Ref hiện có; không được thay toàn bộ artifact bằng riêng luồng đang sửa. "
         "Main Flow, Alternative Flows VÀ Exception Flows ĐỀU PHẢI dùng chung định dạng bảng Markdown 5 cột: "
         "`Step | Actor | Action | BR | Gateway` "
-        "(TUYỆT ĐỐI KHÔNG viết Exception Flows dưới dạng tiêu đề con #### E-01 + gạch đầu dòng, vì parser chỉ đọc được bảng; End States dùng bảng `| ID | Description | Branch Condition |`). "
+        "(BẮT BUỘC dùng đúng tiêu đề `## Main Flow`, `## Exception Flows`, `## End States`; TUYỆT ĐỐI KHÔNG sao chép block `=== FEATURE DEFINITION ===`, KHÔNG dùng mã flag như `WF-F6` làm tiêu đề bảng Main Flow, và KHÔNG viết Exception Flows dưới dạng tiêu đề con #### + gạch đầu dòng; End States dùng bảng `| ID | Description | Branch Condition |`). "
         "Actors phải khớp FD actors (sẽ thành lanes). "
         "Main Flow BẮT BUỘC có ≥3 dòng (Step), mỗi dòng chỉ là 1 hành động nguyên tử của ĐÚNG 1 Actor — TUYỆT ĐỐI KHÔNG gộp thao tác của User (nhập/bấm CTA) và xử lý của System (xác thực/cấp token/điều hướng/bàn giao) vào chung 1 Step; nếu user mô tả gộp, phải tự tách thành từng Step riêng theo Actor để có ≥3 bước rõ ràng cho BPMN swimlanes. "
         "Đặt cổng Gateway `XOR` đúng chuẩn BPMN: chỉ đặt `XOR` ở bước User có nhiều lựa chọn rẽ nhánh khác nhau (hoặc bước System kiểm tra/đánh giá điều kiện rẽ sang `E-xx` khi lỗi); KHÔNG đặt `XOR` ở các bước nhập liệu đơn thuần hay bấm 1 nút CTA đơn (dùng `None`). "
@@ -376,7 +506,7 @@ _wf_extractor = LlmAgent(
 
 _wf_flags = LlmAgent(
     name="wf_flags_checker",
-    model=base_model,
+    model=fast_model,
     instruction=_wf_flags_instruction,
     output_schema=SemanticFlagsEvaluation,
     before_model_callback=wf_flags_before,
@@ -396,7 +526,8 @@ _wf_discussion = LlmAgent(
         "Hỏi làm rõ theo CHECKLIST (ưu tiên required=true). "
         "Không dùng mã flag kỹ thuật (WF-F1…) trong câu trả lời User. "
         "Nhắc OQ/Assumptions nếu có. "
-        "After every Workflow change, read PACKAGE CHANGE REVIEW (deterministic checks) and review all existing workflows, BR references, User Stories, BPMN, and UI Touchpoints. Treat current artifact data and deterministic checks as the source of truth; prior assistant prose is not proof that a change was saved. Report concrete findings and affected sections. If failed_checks is non-empty, do not claim the package is okay and do not ask the user to Validate; guide them to fix the listed findings. Only when failed_checks is empty may you say the package is ready for the user to run Validate. Never claim that Validate has already run. "
+        "After every Workflow change, read PACKAGE CHANGE REVIEW (deterministic checks) and review all existing workflows, BR references, User Stories, BPMN, and UI Touchpoints. Treat current artifact data and deterministic checks as the source of truth; prior assistant prose is not proof that a change was saved. Report concrete findings and affected sections. If failed_checks is non-empty, do not claim the package is okay and do not ask the user to Validate; guide them to fix the listed findings. Only when failed_checks is empty may you say the package is ready for the user to move to User Stories (or Validate after all 4 sections are complete). Never claim that Validate has already run. "
+        "TUYỆT ĐỐI KHÔNG đưa lựa chọn dạng 'Chạy Validate' / 'Validate ngay' vào `AGENT_CHOICES_JSON` vì tin nhắn chat không thể kích hoạt nút Validate (nút Validate nằm ở thanh công cụ và chỉ dùng sau khi hoàn thành cả 4 section). Khi Workflow đã đạt, chỉ gợi ý chuyển sang **User Stories (SEC-04)** hoặc **Preview BPMN**. "
         "When FEATURE DEFINITION.continuity.has_successor is true, include an explicit End States table with IDs and describe each distinct terminal branch separately. The validator requires a one-to-one mapping: every continuity.handoffs record must map to one End State, and each End State ID may map to only one handoff. If several roles or conditions share a broad success outcome, split it into separate End State rows with unique IDs. Generate unused technical IDs from the workflow itself; do not ask the user to provide IDs when branch conditions/destinations are clear. Keep successor detailed screens outside this feature's scope. "
         "Keep continuity `exit_state_id` (handoff outcome identity) separate from `workflow_end_state_id` (the referenced ID in the Workflow End States). Preserve user-provided End State IDs; never rename them or overwrite `exit_state_id` to force a match. The extractor must return the full one-to-one `handoff_mappings` list; mappings are saved atomically only if every index is present, every target ID is unique, and each exact ID exists once in the saved Markdown. Only report WF-F6 from the deterministic package review. "
         "When the existing workflow lacks distinct End States for clearly distinct handoff branches, update the workflow and mapping together; do not leave a many-to-one mapping or tell the user to enter codes. If a destination or branch condition is genuinely ambiguous, ask about that business meaning, not a technical ID. Never claim a mapping or BR reference was saved unless it appears in CURRENT WORKFLOW and the deterministic review confirms the result. "
@@ -404,7 +535,8 @@ _wf_discussion = LlmAgent(
         "You have tools: wiki first (`wiki.search_pages` / `wiki.fetch_page`); "
         "do NOT `web_search` for FD scope_out / non-goals / unrelated browsing; "
         "`web_search` only after wiki miss for in-package clarification; "
-        "`preview_bpmn` after actor-step rows. Never approve/ingest/propose wiki."
+        "`preview_bpmn` after actor-step rows. Never approve/ingest/propose wiki.\n\n"
+        + USER_CHOICES_INSTRUCTION
     ),
     tools=discussion_tools(include_preview_bpmn=True),
     before_model_callback=[
