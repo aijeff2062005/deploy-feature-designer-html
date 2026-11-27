@@ -50,6 +50,7 @@ from managers.control.status import (
 )
 from managers.database import connection as db_connection
 from managers.database.models import BaPackageModel, DesignerHandoffModel
+from managers.integrations.designer.client import DesignerClient
 from managers.integrations.designer.service import send_to_designer
 from managers.runner_context import APP_NAME, get_session_service
 from config.base_config import settings
@@ -442,17 +443,34 @@ async def designer_handoff(session_id: str, body: dict = Body(default={})):
             .first()
         )
         if record and record.response_payload:
-            cached = dict(record.response_payload)
-            cached["status"] = record.status.lower()
-            # Rebuild the browser URL from current configuration so old handoffs stay valid.
-            cached.pop("openpencil_url", None)
-            if record.designer_session_id:
-                query = f"project={project_id}&" if project_id else ""
-                cached["designer_url"] = (
-                    settings.designer_ui_base_url.rstrip("/")
-                    + f"/?{query}session={record.designer_session_id}"
-                )
-            return cached
+            cached_session_id = record.designer_session_id
+            session_alive = True
+            if cached_session_id:
+                session_alive = await DesignerClient(
+                    settings.designer_base_url,
+                    settings.designer_timeout_seconds,
+                    settings.designer_shared_secret,
+                ).session_exists(cached_session_id)
+            if session_alive:
+                cached = dict(record.response_payload)
+                cached["status"] = record.status.lower()
+                # Rebuild the browser URL from current configuration so old handoffs stay valid.
+                cached.pop("openpencil_url", None)
+                if cached_session_id:
+                    query = f"project={project_id}&" if project_id else ""
+                    cached["designer_url"] = (
+                        settings.designer_ui_base_url.rstrip("/")
+                        + f"/?{query}session={cached_session_id}"
+                    )
+                return cached
+            # Previous Designer session was deleted — reset cached handoff and recreate.
+            record.response_payload = None
+            record.designer_session_id = None
+            record.designer_run_id = None
+            record.designer_url = None
+            record.status = "CREATING"
+            record.error_message = None
+            db.commit()
         if record is None:
             record = DesignerHandoffModel(
                 feature_id=session_id,

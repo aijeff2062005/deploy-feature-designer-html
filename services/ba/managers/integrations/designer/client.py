@@ -25,3 +25,22 @@ class DesignerClient:
             detail = response.text[:1000]
             raise RuntimeError(f"Designer handoff failed ({response.status_code}): {detail}")
         return response.json()
+
+    async def session_exists(self, session_id: str) -> bool:
+        """Check whether a handed-off Designer session still exists (returns True on transient errors)."""
+        headers = {}
+        if self.shared_secret:
+            headers["X-Agent-Secret"] = self.shared_secret
+        try:
+            async with httpx.AsyncClient(timeout=min(self.timeout_seconds, 5.0)) as client:
+                response = await client.get(
+                    f"{self.base_url}/api/v1/handoffs/sessions/{session_id}/exists",
+                    headers=headers,
+                )
+            if response.status_code == 404:
+                return False
+            if response.is_success:
+                return bool(response.json().get("exists", True))
+        except Exception:  # noqa: BLE001
+            return True
+        return True

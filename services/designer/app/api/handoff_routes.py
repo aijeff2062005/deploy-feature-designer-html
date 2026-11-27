@@ -3,7 +3,7 @@
 import base64
 import binascii
 import json
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Request, status
 
@@ -132,3 +132,14 @@ async def create_handoff(request: Request, body: DesignerHandoffRequest) -> Desi
             else f"/?session={session.id}"
         ),
     )
+
+
+@router.get("/sessions/{session_id}/exists")
+async def handoff_session_exists(request: Request, session_id: str) -> dict[str, bool]:
+    """Check whether a previously handed-off Designer session still exists."""
+    try:
+        parsed_id = UUID(session_id)
+    except ValueError:
+        return {"exists": False}
+    session = await request.app.state.store.get_session(parsed_id)
+    return {"exists": session is not None}
