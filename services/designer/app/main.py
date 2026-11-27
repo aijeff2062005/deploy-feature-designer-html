@@ -13,6 +13,7 @@ from .api.handoff_routes import router as handoff_router
 from .api.screens import router as screens_router
 from .api.design_systems import router as design_systems_router
 from .api.project_wiki import router as project_wiki_router
+from .api.prototype import router as prototype_router
 from .api.stream import EventStream
 from .core.config import get_settings
 from .core.errors import AppError
@@ -92,6 +93,7 @@ def create_app() -> FastAPI:
     app.include_router(screens_router, dependencies=[Depends(designer_access)])
     app.include_router(design_systems_router, dependencies=[Depends(designer_access)])
     app.include_router(project_wiki_router, dependencies=[Depends(designer_access)])
+    app.include_router(prototype_router, dependencies=[Depends(designer_access)])
     app.include_router(handoff_router, dependencies=[Depends(handoff_secret)])
 
     @app.exception_handler(AppError)

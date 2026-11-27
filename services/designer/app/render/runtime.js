@@ -67,6 +67,25 @@
     hovered = event.target.closest("[data-d]");
     outline(hovered, true);
   });
+  const BACK_RE = /(quay lại|trở lại|back|đăng xuất|logout|hủy yêu cầu)/i;
+  function isBackEl(el) {
+    if (!el) return false;
+    const label = ((el.getAttribute("aria-label") || "") + " " + (el.innerText || "")).trim();
+    if (BACK_RE.test(label)) return true;
+    const icon = el.querySelector("[data-lucide]");
+    if (icon && /arrow-left|chevron-left|log-out/i.test(icon.getAttribute("data-lucide") || "")) {
+      return label.length < 24;
+    }
+    return false;
+  }
+
+  function isPrimaryCta(el) {
+    if (!el || isBackEl(el)) return false;
+    if (el.getAttribute("data-design-variant") === "primary") return true;
+    const cls = typeof el.className === "string" ? el.className : "";
+    return /\bbg-primary\b/.test(cls) || (/\bw-full\b/.test(cls) && /\bbg-\[?#?00/.test(cls));
+  }
+
   document.addEventListener(
     "click",
     (event) => {
@@ -80,7 +99,21 @@
       const link = event.target.closest("[data-goto]");
       if (link) {
         event.preventDefault();
-        post({ type: "goto", screen: link.getAttribute("data-goto") });
+        post({
+          type: "goto",
+          screen: link.getAttribute("data-goto"),
+          isPrimary: isPrimaryCta(link),
+          isBack: isBackEl(link),
+          label: (link.innerText || link.getAttribute("aria-label") || "").trim().slice(0, 80),
+        });
+        return;
+      }
+      const btn = event.target.closest("button, a");
+      if (btn && !btn.disabled && isPrimaryCta(btn)) {
+        post({
+          type: "primary_cta",
+          label: (btn.innerText || btn.getAttribute("aria-label") || "").trim().slice(0, 80),
+        });
       }
     },
     true,
@@ -99,8 +132,21 @@
     } else if (data.type === "designer:diff") {
       if (data.show) document.documentElement.setAttribute("data-show-diff", "1");
       else document.documentElement.removeAttribute("data-show-diff");
+    } else if (data.type === "designer:hotspots") {
+      if (data.on) document.documentElement.setAttribute("data-show-hotspots", "1");
+      else document.documentElement.removeAttribute("data-show-hotspots");
     }
   });
+
+  function installHotspotStyle() {
+    if (document.getElementById("designer-hotspots")) return;
+    const style = document.createElement("style");
+    style.id = "designer-hotspots";
+    style.textContent =
+      "@keyframes designerHotspotPulse{0%,100%{box-shadow:0 0 0 2px rgba(99,102,241,.85),0 0 0 5px rgba(99,102,241,.22)}50%{box-shadow:0 0 0 2px rgba(56,189,248,.95),0 0 0 8px rgba(56,189,248,.28)}}" +
+      'html[data-show-hotspots="1"] [data-goto]{outline:2px solid #6366f1!important;outline-offset:2px!important;border-radius:6px;animation:designerHotspotPulse 1.6s ease-in-out infinite!important;cursor:pointer!important;}';
+    document.head.appendChild(style);
+  }
 
   const icons = () => {
     if (window.lucide && document.querySelector("i[data-lucide]")) window.lucide.createIcons();
@@ -111,6 +157,7 @@
     icons();
     new MutationObserver(icons).observe(document.body, { childList: true, subtree: true });
     assignIds(document.body);
+    installHotspotStyle();
     window.__designer.states = installStates();
     post({ type: "ready", states: window.__designer.states, height: document.documentElement.scrollHeight });
   };

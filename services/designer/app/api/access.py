@@ -34,6 +34,9 @@ async def designer_access(request: Request) -> None:
         exists, project_id = await store.session_project(request.path_params["session_id"])
     elif "run_id" in request.path_params:
         exists, project_id = await store.run_project(request.path_params["run_id"])
+    elif "project_id" in request.path_params:
+        project_id = request.path_params["project_id"]
+        exists = True
     else:
         return
     if not exists:

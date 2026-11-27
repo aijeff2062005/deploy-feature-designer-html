@@ -218,6 +218,47 @@ export const api = {
         }),
     hulyAttachmentPreview: (sessionId: string, runId: string) =>
         request<import("./types").HulyAttachmentPreview>(`/sessions/${sessionId}/huly/preview?run_id=${encodeURIComponent(runId)}`),
+    projectPrototype: (pid: string) =>
+        request<ProjectPrototype>(`/projects/${encodeURIComponent(pid)}/prototype`),
+};
+
+export type PrototypeFeature = {
+    index: number;
+    session_id: string;
+    title: string;
+    screen_keys: string[];
+    entry_screen_key?: string | null;
+    exit_screen_key?: string | null;
+};
+
+export type PrototypeScreen = {
+    key: string;
+    id: string;
+    name: string;
+    session_id: string;
+    session_title: string;
+    feature_index: number;
+    platform: string;
+    width: number;
+    version: number;
+    gotos: string[];
+    states: string[];
+};
+
+export type PrototypeEdge = {
+    from_key: string;
+    to_key: string;
+    kind: "internal" | "cross_feature" | "handoff";
+    direction?: "forward" | "back";
+    label?: string | null;
+};
+
+export type ProjectPrototype = {
+    project_id: string;
+    start_screen_key: string | null;
+    features: PrototypeFeature[];
+    screens: PrototypeScreen[];
+    edges: PrototypeEdge[];
 };
 
 export type ProjectWikiVersion = {
@@ -239,4 +280,11 @@ export function canvasUrl(sessionId: string): string {
     const params = new URLSearchParams({ session: sessionId });
     if (projectId) params.set("project", projectId);
     return `${import.meta.env.BASE_URL}canvas.html?${params}`;
+}
+
+export function prototypeUrl(pid?: string): string {
+    const target = (pid || projectId || "").trim();
+    const params = new URLSearchParams();
+    if (target) params.set("project", target);
+    return `${import.meta.env.BASE_URL}prototype.html${params.toString() ? `?${params}` : ""}`;
 }
