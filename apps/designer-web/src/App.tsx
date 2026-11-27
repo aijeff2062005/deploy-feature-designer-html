@@ -274,7 +274,7 @@ export default function App() {
                 />
             </section>
 
-            {canvasOpen && <CanvasApp key={activeSession?.id} onBack={() => setCanvasOpen(false)} initialScreenId={canvasScreenId} />}
+            {canvasOpen && <CanvasApp key={activeSession?.id} sessionId={activeSession?.id} onBack={() => setCanvasOpen(false)} initialScreenId={canvasScreenId} />}
 
             {!canvasOpen && <ChatWorkspace
                 run={activeRun}

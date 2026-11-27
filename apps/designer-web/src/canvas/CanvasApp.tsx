@@ -29,7 +29,7 @@ import {
     Tablet,
     X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { useTheme } from "../theme";
 import type { Run, Screen, ScreenVersion } from "../types";
@@ -37,6 +37,8 @@ import type { Run, Screen, ScreenVersion } from "../types";
 const params = new URLSearchParams(window.location.search);
 const SESSION = params.get("session") || "";
 const DESIGN_SYSTEM = params.get("ds") || "";
+const SessionContext = createContext(SESSION);
+const useSessionId = () => useContext(SessionContext);
 const PLATFORMS: Record<string, { label: string; icon: typeof Monitor }> = {
     mobile: { label: "Mobile", icon: Smartphone },
     tablet: { label: "Tablet", icon: Tablet },
@@ -141,9 +143,16 @@ type ScreenMessage =
     | { source: "designer-screen"; type: "goto"; screen: string }
     | { source: "designer-screen"; type: "select"; element: { id: string; tag: string; text: string; html: string } };
 
-export function CanvasApp({ onBack, initialScreenId }: { onBack?: () => void; initialScreenId?: string }) {
+export function CanvasApp({ onBack, initialScreenId, sessionId }: { onBack?: () => void; initialScreenId?: string; sessionId?: string }) {
     useTheme();
-    return DESIGN_SYSTEM ? <Gallery id={DESIGN_SYSTEM} /> : SESSION ? <ScreensCanvas onBack={onBack} initialScreenId={initialScreenId} /> : <p className="canvas-empty">Thiếu session.</p>;
+    const activeSessionId = sessionId || SESSION;
+    if (DESIGN_SYSTEM) return <Gallery id={DESIGN_SYSTEM} />;
+    if (!activeSessionId) return <p className="canvas-empty">Thiếu session.</p>;
+    return (
+        <SessionContext.Provider value={activeSessionId}>
+            <ScreensCanvas onBack={onBack} initialScreenId={initialScreenId} />
+        </SessionContext.Provider>
+    );
 }
 
 function Frame({
@@ -201,6 +210,7 @@ function Frame({
 
 /** Export popover: the .fig layout choice applies to the .fig and to the design.fig inside the zip. */
 function ExportMenu({ screen, state }: { screen?: Screen; state: string }) {
+    const sessionId = useSessionId();
     const [open, setOpen] = useState(false);
     const [layout, setLayout] = useState<FigLayout>(readLayout);
     const box = useRef<HTMLDivElement>(null);
@@ -257,14 +267,14 @@ function ExportMenu({ screen, state }: { screen?: Screen; state: string }) {
                         ))}
                     </div>
                     <div className="export-items">
-                        <a className="export-item primary" href={api.exportUrl(SESSION, "fig", layout)} onClick={() => setOpen(false)}>
+                        <a className="export-item primary" href={api.exportUrl(sessionId, "fig", layout)} onClick={() => setOpen(false)}>
                             <Download size={16} />
                             <span>
                                 <strong>File Figma (.fig)</strong>
                                 <small>Kéo thả vào Figma để chỉnh sửa</small>
                             </span>
                         </a>
-                        <a className="export-item" href={api.exportUrl(SESSION, "zip", layout)} onClick={() => setOpen(false)}>
+                        <a className="export-item" href={api.exportUrl(sessionId, "zip", layout)} onClick={() => setOpen(false)}>
                             <FileArchive size={16} />
                             <span>
                                 <strong>HTML + PNG (.zip)</strong>
@@ -274,7 +284,7 @@ function ExportMenu({ screen, state }: { screen?: Screen; state: string }) {
                         {screen && (
                             <a
                                 className="export-item"
-                                href={api.screenshotUrl(SESSION, screen.id, state)}
+                                href={api.screenshotUrl(sessionId, screen.id, state)}
                                 target="_blank"
                                 rel="noreferrer"
                                 onClick={() => setOpen(false)}
@@ -303,6 +313,7 @@ function noScrollDoc(doc: string): string {
 }
 
 function ScreenThumbnail({ screen, index }: { screen: Screen; index: number }) {
+    const sessionId = useSessionId();
     const box = useRef<HTMLSpanElement>(null);
     const [doc, setDoc] = useState("");
     const [boxWidth, setBoxWidth] = useState(120);
@@ -312,9 +323,9 @@ function ScreenThumbnail({ screen, index }: { screen: Screen; index: number }) {
     useEffect(() => {
         let active = true;
         setDoc("");
-        api.screenDocument(SESSION, screen.id).then((html) => { if (active) setDoc(html); }).catch(() => undefined);
+        api.screenDocument(sessionId, screen.id).then((html) => { if (active) setDoc(html); }).catch(() => undefined);
         return () => { active = false; };
-    }, [screen.id, screen.version]);
+    }, [sessionId, screen.id, screen.version]);
 
     useEffect(() => {
         const element = box.current;
@@ -393,6 +404,7 @@ const OVERVIEW_GAP = 24;
 
 /** Horizontal overview — one numbered card per screen, in flow order. */
 function MultiView({ screens, selectedId, onSelect, layout = "flow" }: { screens: Screen[]; selectedId: string; onSelect: (id: string) => void; layout?: "flow" | "selected" }) {
+    const sessionId = useSessionId();
     const [docs, setDocs] = useState<Record<string, string>>({});
     const [zoom, setZoom] = useState(0.42);
     const containerRef = useRef<HTMLDivElement>(null);
@@ -402,12 +414,12 @@ function MultiView({ screens, selectedId, onSelect, layout = "flow" }: { screens
         screens.forEach((s) => {
             const key = `${s.id}:${s.version}`;
             if (docs[key]) return;
-            api.screenDocument(SESSION, s.id).then((d) => {
+            api.screenDocument(sessionId, s.id).then((d) => {
                 if (active) setDocs((prev) => ({ ...prev, [key]: d }));
             }).catch(() => undefined);
         });
         return () => { active = false; };
-    }, [screens]);
+    }, [sessionId, screens]);
 
     // Ctrl+wheel zoom
     useEffect(() => {
@@ -680,6 +692,7 @@ function CompareView({
     onChangeRight: (v: number) => void;
     onClose: () => void;
 }) {
+    const sessionId = useSessionId();
     const defaultH = screen.platform === "mobile" ? 844 : screen.platform === "tablet" ? 1024 : 900;
     const screenW = screen.width ?? (screen.platform === "mobile" ? 390 : 1440);
     const [leftDoc, setLeftDoc] = useState("");
@@ -704,8 +717,8 @@ function CompareView({
         setLeftH(defaultH);
         setRightH(defaultH);
         Promise.all([
-            api.screenDocument(SESSION, screen.id, leftVersion),
-            api.screenDocument(SESSION, screen.id, rightVersion),
+            api.screenDocument(sessionId, screen.id, leftVersion),
+            api.screenDocument(sessionId, screen.id, rightVersion),
         ])
             .then(([l, r]) => {
                 if (!active) return;
@@ -863,6 +876,7 @@ function CompareView({
 }
 
 function ScreensCanvas({ onBack, initialScreenId }: { onBack?: () => void; initialScreenId?: string }) {
+    const sessionId = useSessionId();
     const { resolvedTheme, toggleTheme } = useTheme();
     const [screens, setScreens] = useState<Screen[]>([]);
     const [current, setCurrent] = useState(initialScreenId || params.get("screen") || "");
@@ -898,11 +912,11 @@ function ScreensCanvas({ onBack, initialScreenId }: { onBack?: () => void; initi
     const backUrl = (() => {
         const project = params.get("project");
         const base = window.location.pathname.replace("canvas.html", "");
-        return project ? `${base}?session=${SESSION}&project=${project}` : `${base}?session=${SESSION}`;
+        return project ? `${base}?session=${sessionId}&project=${project}` : `${base}?session=${sessionId}`;
     })();
     const channel = useMemo(
-        () => (typeof BroadcastChannel !== "undefined" ? new BroadcastChannel(`designer-canvas-${SESSION}`) : null),
-        [],
+        () => (typeof BroadcastChannel !== "undefined" ? new BroadcastChannel(`designer-canvas-${sessionId}`) : null),
+        [sessionId],
     );
 
     const screen = screens.find((s) => s.id === current) ?? screens[0];
@@ -910,13 +924,13 @@ function ScreensCanvas({ onBack, initialScreenId }: { onBack?: () => void; initi
     const width = screen?.width ?? 1440;
 
     const loadScreens = useCallback(async () => {
-        const items = await api.listScreens(SESSION);
+        const items = await api.listScreens(sessionId);
         setScreens((old) =>
             old.length === items.length && old.every((s, i) => s.id === items[i].id && s.version === items[i].version)
                 ? old
                 : items,
         );
-    }, []);
+    }, [sessionId]);
 
     useEffect(() => {
         void loadScreens().catch((e) => setToast((e as Error).message));
@@ -939,7 +953,7 @@ function ScreensCanvas({ onBack, initialScreenId }: { onBack?: () => void; initi
     }, [screens, current, initialScreenId]);
 
     const loadEditRuns = useCallback(async () => {
-        const items = await api.listRuns(SESSION);
+        const items = await api.listRuns(sessionId);
         setEditRuns(items.filter((run) => SCREEN_EDIT_MARKER.test(run.prompt)));
     }, []);
 
@@ -963,14 +977,14 @@ function ScreensCanvas({ onBack, initialScreenId }: { onBack?: () => void; initi
     useEffect(() => {
         if (!screen) return;
         let cancelled = false;
-        api.screenDocument(SESSION, screen.id, version).then((d) => !cancelled && setDoc(d)).catch(() => undefined);
+        api.screenDocument(sessionId, screen.id, version).then((d) => !cancelled && setDoc(d)).catch(() => undefined);
         const versionScreen = codeOpen ? codeScreen : screen;
-        if (versionScreen) api.screenVersions(SESSION, versionScreen.id).then((v) => !cancelled && setVersions(v)).catch(() => undefined);
-        if (codeOpen && codeScreen) api.getScreen(SESSION, codeScreen.id, version).then((s) => !cancelled && setCode(s.html ?? ""));
+        if (versionScreen) api.screenVersions(sessionId, versionScreen.id).then((v) => !cancelled && setVersions(v)).catch(() => undefined);
+        if (codeOpen && codeScreen) api.getScreen(sessionId, codeScreen.id, version).then((s) => !cancelled && setCode(s.html ?? ""));
         return () => {
             cancelled = true;
         };
-    }, [screen?.id, screen?.version, codeScreen?.id, codeScreen?.version, version, codeOpen]);
+    }, [sessionId, screen?.id, screen?.version, codeScreen?.id, codeScreen?.version, version, codeOpen]);
 
     useEffect(() => {
         setState("");
@@ -1020,7 +1034,7 @@ function ScreensCanvas({ onBack, initialScreenId }: { onBack?: () => void; initi
     const saveCode = async () => {
         if (!codeScreen) return;
         try {
-            await api.saveScreen(SESSION, codeScreen.id, { name: codeScreen.name, platform: codeScreen.platform, html: code, note: "manual edit", expected_version: codeScreen.version });
+            await api.saveScreen(sessionId, codeScreen.id, { name: codeScreen.name, platform: codeScreen.platform, html: code, note: "manual edit", expected_version: codeScreen.version });
             setVersion(undefined);
             await loadScreens();
             setToast("Đã lưu phiên bản mới");
@@ -1071,7 +1085,7 @@ function ScreensCanvas({ onBack, initialScreenId }: { onBack?: () => void; initi
         setEditError("");
         setSyncLabel("Đang đồng bộ hội thoại…");
         try {
-            const run = await api.sendMessage(SESSION, {
+            const run = await api.sendMessage(sessionId, {
                 content: prompt,
                 screen_name_hint: selectedScreens.length === 1 ? selectedScreens[0].name : `${selectedScreens.length} màn hình đã chọn`,
                 platform_hint: selectedScreens[0].platform,
@@ -1093,14 +1107,14 @@ function ScreensCanvas({ onBack, initialScreenId }: { onBack?: () => void; initi
     const undoCurrentScreen = async () => {
         if (!screen) return;
         try {
-            const history = await api.screenVersions(SESSION, screen.id);
+            const history = await api.screenVersions(sessionId, screen.id);
             const previous = history.find((item) => item.version < screen.version);
             if (!previous) {
                 setEditError("Chưa có phiên bản trước để hoàn tác.");
                 return;
             }
-            const prior = await api.getScreen(SESSION, screen.id, previous.version);
-            await api.saveScreen(SESSION, screen.id, {
+            const prior = await api.getScreen(sessionId, screen.id, previous.version);
+            await api.saveScreen(sessionId, screen.id, {
                 name: screen.name, platform: screen.platform, html: prior.html ?? "",
                 note: `Hoàn tác về v${previous.version}`, expected_version: screen.version,
             });
@@ -1411,7 +1425,7 @@ function ScreensCanvas({ onBack, initialScreenId }: { onBack?: () => void; initi
                                     )}
                                     {failed && run.error?.code === "SCREEN_VERSION_CONFLICT" && (
                                         <button className="canvas-edit-reload" type="button" onClick={() => {
-                                            void loadScreens().then(() => api.listScreens(SESSION)).then((items) => {
+                                            void loadScreens().then(() => api.listScreens(sessionId)).then((items) => {
                                                 const targetId = run.prompt.match(SCREEN_EDIT_MARKER)?.[1].split(",")[0].split("@")[0];
                                                 if (targetId && items.some((item) => item.id === targetId)) setCurrent(targetId);
                                                 setVersion(undefined);
