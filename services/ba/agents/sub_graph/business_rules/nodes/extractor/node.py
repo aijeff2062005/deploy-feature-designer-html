@@ -19,6 +19,8 @@ def create_br_extractor_node():
             "Trích xuất business rules từ tin nhắn user theo chế độ DELTA. "
             "CHỈ trả về các rule được thêm mới hoặc sửa trong lượt này; KHÔNG lặp lại các rule cũ không đổi (backend tự merge theo id). "
             "Nếu user không thêm/sửa rule nào, trả `{\"business_rules\": []}`. "
+            "Khi user yêu cầu sửa lỗi cờ trong FAILED BR FLAGS (ví dụ technical constraint hoặc rule mơ hồ), "
+            "hãy viết lại các rule liên quan và trả chúng trong `business_rules`. "
             "Trả JSON với business_rules: [{id, statement, source}]. "
             "Không xóa rule cũ trừ khi user yêu cầu sửa id cụ thể."
         ),

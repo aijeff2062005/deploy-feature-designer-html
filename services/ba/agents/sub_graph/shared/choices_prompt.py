@@ -16,8 +16,10 @@ USER_CHOICES_INSTRUCTION = (
     "- TUYỆT ĐỐI KHÔNG dùng mã slug/từ khóa kỹ thuật (như `update_and_review`, `preview_bpmn`, `skip`, `snake_case`) trong trường `value`. "
     "`value` PHẢI là câu tiếng Việt đầy đủ, rõ nghĩa và nêu rõ hành động/đối tượng để bước trích xuất có thể thực thi ngay.\n"
     "- KHÔNG lặp lại câu hỏi: trước khi hỏi, kiểm tra lịch sử hội thoại gần nhất và artifact hiện tại — tuyệt đối KHÔNG hỏi lại câu hỏi hoặc lựa chọn mà người dùng đã trả lời/chọn ở lượt trước.\n"
-    "- TUYỆT ĐỐI KHÔNG gắn block này khi đang chào hỏi, giải thích thông tin chung, hoặc đặt câu hỏi mở để thu thập dữ liệu (ví dụ hỏi tên tác nhân, mô tả màn hình, quy tắc nghiệp vụ...).\n"
+    "- TUYỆT ĐỐI KHÔNG gắn block này khi đang chào hỏi lần đầu, giải thích thông tin chung, hoặc đặt câu hỏi mở không có phương án gợi ý.\n"
+    "- BẮT BUỘC gắn `AGENT_CHOICES_JSON` mỗi khi bạn đặt 'Câu hỏi cần chốt' hoặc đưa ra 2+ ví dụ/phương án trả lời gợi ý cho người dùng (ví dụ: có mục 'Ví dụ:', các phương án mặc định, hoặc câu hỏi xác nhận bổ sung trường còn thiếu như `deferred_scope`, `actor`, `rule`...) để người dùng có thể bấm chọn ngay thay vì gõ tay.\n"
     "- Nếu bạn liệt kê các mục gợi ý còn thiếu hoặc các lỗi cần sửa (ví dụ 2+ mục đánh số 1, 2, 3...), hãy gắn `AGENT_CHOICES_JSON` với `\"multi\": true` liệt kê từng mục đó để người dùng chọn các mục muốn sửa cùng lúc.\n"
     "- Đặt `multi: true` chỉ khi người dùng có thể chọn nhiều phương án cùng lúc; tối đa 5 options mỗi câu; KHÔNG thêm mục 'Khác' vào JSON vì giao diện đã tự có sẵn ô nhập Khác.\n"
+    "- TRUNG THỰC VỚI CHECKLIST: tuyệt đối KHÔNG nói 'đã sửa xong / đã đạt hết' nếu `=== CHECKLIST ===` vẫn còn mục FAIL/MISSING_VALUE/NOT_YET_REASONABLE; hãy nêu rõ mục nào còn vướng và gắn `AGENT_CHOICES_JSON` để người dùng chọn hướng xử lý.\n"
     "- Không nhắc tới hay giải thích thẻ `AGENT_CHOICES_JSON` trong nội dung trả lời cho người dùng."
 )

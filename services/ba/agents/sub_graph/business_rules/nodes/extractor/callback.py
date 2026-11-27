@@ -41,10 +41,18 @@ async def br_extractor_inject_callback(
     fd = trim_feature_definition(
         callback_context.state.get("artifacts", {}).get("feature_definition", {})
     )
+    br_flags = callback_context.state.get("flags", {}).get("br", {})
+    failed_br_flags = {
+        k: v
+        for k, v in br_flags.items()
+        if isinstance(v, dict) and v.get("status") in {"FAIL", "NOT_YET_REASONABLE", "MISSING_VALUE"}
+    }
     ctx = (
         f"=== FEATURE DEFINITION (context) ===\n"
         f"{json.dumps(fd, ensure_ascii=False)}\n\n"
         f"=== CURRENT BUSINESS RULES ===\n"
         f"{json.dumps(rules, ensure_ascii=False)}"
     )
+    if failed_br_flags:
+        ctx += f"\n\n=== FAILED BR FLAGS ===\n{json.dumps(failed_br_flags, ensure_ascii=False)}"
     insert_context(llm_request, ctx)

@@ -22,7 +22,7 @@ def is_user_story_row_complete(uc: dict[str, Any] | None) -> bool:
     if not isinstance(uc, dict):
         return False
     statement = str(uc.get("statement") or "")
-    if not re.search(r"muốn.+để", statement, re.I):
+    if not re.search(r"muốn.+(?:để|nhằm)", statement, re.I):
         return False
     if not str(uc.get("actor_id") or "").strip():
         return False
@@ -114,6 +114,15 @@ def merge_use_cases(
         }
         by_id[proposed_id].update(uc)
 
+    # Drop obsolete parent story (e.g. US-03) when split sub-stories (US-03a, US-03b) exist.
+    split_parents = {
+        m.group(1)
+        for c in cases
+        if (m := re.match(r"^(US-\d+)[a-z]$", str(c.get("id") or "")))
+    }
+    if split_parents:
+        cases = [c for c in cases if str(c.get("id") or "") not in split_parents]
+
     active = resolve_active_user_story_id(cases, active)
     return cases, active
 
@@ -162,7 +171,7 @@ def check_uc_flags_logic(ctx) -> dict[str, Any]:
     bad_format = [
         c
         for c in cases
-        if not re.search(r"muốn.+để", c.get("statement", ""), re.I)
+        if not re.search(r"muốn.+(?:để|nhằm)", c.get("statement", ""), re.I)
     ]
     if not cases:
         flags["UC-F2"] = flag_dict(2, "Statement format", MISSING_VALUE)
@@ -224,6 +233,16 @@ def check_uc_flags_logic(ctx) -> dict[str, Any]:
 
     # UC-F6 actor coverage (warning, code)
     covered = {c.get("actor_id") for c in cases if c.get("actor_id")}
+    # Also count actors (e.g. system actors) explicitly referenced in AC Given/When/Then.
+    ac_text = "\n".join(
+        f"{ac.get('given', '')} {ac.get('when', '')} {ac.get('then', '')}"
+        for c in cases
+        for ac in (c.get("acceptance_criteria") or [])
+        if isinstance(ac, dict)
+    )
+    for aid in actor_ids:
+        if aid and aid not in covered and aid in ac_text:
+            covered.add(aid)
     primary = {a for a in actor_ids if a}
     missing_actors = sorted(primary - covered) if primary else []
     if not cases:

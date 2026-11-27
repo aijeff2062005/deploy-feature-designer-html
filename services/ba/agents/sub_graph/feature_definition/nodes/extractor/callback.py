@@ -113,6 +113,14 @@ async def fd_extractor_inject_callback(
             "Return the complete preserved handoffs list only if evidence supports an update. "
             "An empty field does not prove the user has not supplied the information."
         )
+    fd_flags = state.get("flags", {}).get("fd", {})
+    failed_fd_flags = {
+        k: v
+        for k, v in fd_flags.items()
+        if isinstance(v, dict) and v.get("status") in {"FAIL", "NOT_YET_REASONABLE", "MISSING_VALUE"}
+    }
+    if failed_fd_flags:
+        context_text += f"\n=== FAILED FD FLAGS ===\n{json.dumps(failed_fd_flags, ensure_ascii=False)}"
     context_text += "\n" + format_approved_wiki_context(state, include_content=True)
     context_text += "\n" + fd_context_prompt(state.get("project_context"))
     insert_context(llm_request, context_text)

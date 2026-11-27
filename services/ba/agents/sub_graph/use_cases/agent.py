@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from google.adk.agents import LlmAgent
@@ -78,12 +79,24 @@ async def uc_extractor_inject(
             "Never invent extra User Stories that the user did not state."
         ),
     }
+    bad_statement_ids = [
+        str(c.get("id"))
+        for c in (cases or [])
+        if isinstance(c, dict) and not re.search(r"muốn.+để", str(c.get("statement") or ""), re.I)
+    ]
+    uc_flags = callback_context.state.get("flags", {}).get("uc", {})
+    failed_flags = {
+        k: v
+        for k, v in uc_flags.items()
+        if isinstance(v, dict) and v.get("status") in {"FAIL", "NOT_YET_REASONABLE"}
+    }
     insert_context(
         llm_request,
         f"=== FEATURE DEFINITION ===\n{json.dumps(fd, ensure_ascii=False)}\n\n"
         f"=== BUSINESS RULES ===\n{json.dumps(br, ensure_ascii=False)}\n\n"
         f"=== WORKFLOW ===\n{json.dumps(wf, ensure_ascii=False)}\n\n"
         f"=== USER STORIES (use_cases) ===\n{json.dumps(cases, ensure_ascii=False)}\n\n"
+        f"=== FAILED UC FLAGS ===\n{json.dumps({'failed_flags': failed_flags, 'bad_statement_ids': bad_statement_ids}, ensure_ascii=False)}\n\n"
         f"=== ACTIVE STORY LOCK ===\n{json.dumps(lock_note, ensure_ascii=False)}",
     )
 
@@ -185,6 +198,8 @@ _uc_extractor = LlmAgent(
         "CHỈ trả về các User Story được người dùng thêm mới hoặc chỉnh sửa trong lượt này; KHÔNG lặp lại các US cũ không thay đổi (backend tự merge theo id). "
         "Nếu người dùng không thêm/sửa US nào (chỉ xác nhận hoặc hỏi), trả `{\"use_cases\": []}`. "
         "statement BẮT BUỘC đúng mẫu: 'Là ..., tôi muốn ... để ...' (luôn có cả 'muốn' và 'để'). "
+        "Khi người dùng yêu cầu sửa Statement format / sửa lỗi cờ (hoặc FAILED UC FLAGS có bad_statement_ids), "
+        "BẮT BUỘC viết lại statement của TẤT CẢ các US trong bad_statement_ids theo đúng mẫu 'Là ..., tôi muốn ... để ...' và trả chúng trong `use_cases`. "
         "Một actor, một goal; AC cite BR-XX đã có. "
         "actor_id phải khớp ACT-ID từ Feature Definition. "
         "KHÔNG tự bịa thêm US mà người dùng chưa nêu. Không ghi đè artifact từ wiki."
