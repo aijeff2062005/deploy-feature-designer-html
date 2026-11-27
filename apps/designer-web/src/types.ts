@@ -144,9 +144,11 @@ export interface HulyBulkIssueDraft {
 }
 
 export type HulyProposalPriority = "urgent" | "high" | "medium" | "low" | "none";
+export type HulyTaskKind = "happy_path" | "exception";
 
 export interface HulyProposedTask {
     key: string;
+    task_kind?: HulyTaskKind;
     title: string;
     outcome: string;
     current_state: string;

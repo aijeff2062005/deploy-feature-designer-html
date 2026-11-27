@@ -36,6 +36,8 @@ import {
     toBrowserFile,
 } from "./projectFiles";
 import { api } from "./api";
+import { AgentChoiceCard } from "./AgentChoiceCard";
+import { extractAgentChoices, stripAgentChoicesTag } from "./agentChoices";
 import { STARTER_PROMPTS, StyleSelector } from "./ChatControls";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import type {
@@ -349,6 +351,9 @@ interface Props {
 }
 
 function eventText(event: WorkflowEvent) {
+    if (event.type === "assistant.message" && event.payload.message != null) {
+        return String(event.payload.message);
+    }
     const value = event.payload.message ?? event.payload.detail ?? event.type;
     return String(value).replaceAll("_", " ");
 }
@@ -631,6 +636,24 @@ export function ChatWorkspace({
     const [clarificationDecisions, setClarificationDecisions] = useState<Record<number, "confirm" | "defer" | "exclude">>({});
     const [clarificationAnswers, setClarificationAnswers] = useState<Record<number, string>>({});
     const [hulyDialogStage, setHulyDialogStage] = useState<"proposal" | "detail" | "clarify" | "configure" | "review">("proposal");
+    const [editingProposalDetail, setEditingProposalDetail] = useState(false);
+    const choiceStorageKey = sessionId ? `designer.choiceDismissed:${sessionId}` : "";
+    const [dismissedChoiceKey, setDismissedChoiceKey] = useState(() => {
+        try { return choiceStorageKey ? sessionStorage.getItem(choiceStorageKey) || "" : ""; } catch { return ""; }
+    });
+    const [lastAnsweredChoiceQuestion, setLastAnsweredChoiceQuestion] = useState(() => {
+        try { return choiceStorageKey ? sessionStorage.getItem(`${choiceStorageKey}:q`) || "" : ""; } catch { return ""; }
+    });
+    const markChoiceHandled = (key: string, question: string) => {
+        setDismissedChoiceKey(key);
+        setLastAnsweredChoiceQuestion(question);
+        try {
+            if (choiceStorageKey) {
+                sessionStorage.setItem(choiceStorageKey, key);
+                sessionStorage.setItem(`${choiceStorageKey}:q`, question);
+            }
+        } catch { /* ignore */ }
+    };
     const [hulyLoading, setHulyLoading] = useState(false);
     const [hulySubmitting, setHulySubmitting] = useState(false);
     const [hulyError, setHulyError] = useState("");
@@ -687,7 +710,7 @@ export function ChatWorkspace({
         return () => { active = false; };
     }, [hulyDialogOpen, hulyProjectId]);
 
-    const hulyProposalCacheKey = sessionId && run ? `huly-proposal:v5:${sessionId}:${run.id}` : "";
+    const hulyProposalCacheKey = sessionId && run ? `huly-proposal:v7:${sessionId}:${run.id}` : "";
     useLayoutEffect(() => {
         if (hulyDialogOpen && hulyDialogBodyRef.current) hulyDialogBodyRef.current.scrollTop = 0;
     }, [hulyDialogOpen, hulyDialogStage]);
@@ -725,6 +748,15 @@ export function ChatWorkspace({
     const selectedProposedTask = hulyProposal?.proposal.tasks.find((task) => task.key === selectedProposalKey) ?? null;
     const selectedProposedTasks = hulyProposal?.proposal.tasks.filter((task) => selectedProposalKeys.includes(task.key)) ?? [];
     const proposalPriorityLabel: Record<string, string> = { urgent: "Urgent", high: "High", medium: "Medium", low: "Low", none: "Chưa đề xuất" };
+    const proposalTaskKindLabel: Record<string, string> = { happy_path: "Trải nghiệm người dùng", exception: "Kiểm soát nghiệp vụ" };
+    const renderBulletText = (raw: string) => {
+        const clean = raw.replace(/\*\*/g, "").trim();
+        const colon = clean.indexOf(":");
+        if (colon > 0 && colon <= 72) {
+            return <><strong>{clean.slice(0, colon + 1)}</strong>{clean.slice(colon + 1)}</>;
+        }
+        return clean;
+    };
     const finalBlocked = false;
     const designWikiFiles = wikiPreviewFiles.map((file) => ({
         ...file,
@@ -1007,7 +1039,7 @@ export function ChatWorkspace({
     const submitHulyIssues = async () => {
         if (!run || !sessionId || !hulyProposal || !hulyProjectId || hulySubmitting) return;
         if (!selectedProposedTasks.length) { setHulyError("Chọn ít nhất một task cần tạo."); return; }
-        const incompleteContent = selectedProposedTasks.filter((task) => !task.title.trim() || !task.outcome.trim() || !task.solution?.trim() || !task.scope_in.length || task.scope_in.some((item) => !item.trim()) || task.scope_out.some((item) => !item.trim()) || !task.acceptance_criteria.length || task.acceptance_criteria.some((item) => !item.trim()));
+        const incompleteContent = selectedProposedTasks.filter((task) => !task.title.trim() || !task.outcome.trim() || (!task.solution?.trim() && !task.scope_in.length) || !task.scope_in.length || task.scope_in.some((item) => !item.trim()) || task.scope_out.some((item) => !item.trim()) || !task.acceptance_criteria.length || task.acceptance_criteria.some((item) => !item.trim()));
         if (incompleteContent.length) { setHulyError(`Hoàn thiện kết quả, giải pháp, phạm vi và tiêu chí nghiệm thu cho: ${incompleteContent.map((task) => task.title || task.key).join(", ")}`); return; }
         const missing = selectedProposedTasks.filter((task) => {
             const config = hulyTaskConfigs[task.key];
@@ -1114,6 +1146,8 @@ export function ChatWorkspace({
             assets: attachments.flatMap((item) => item.asset ? [item.asset] : []),
         });
         setPrompt("");
+        setLastAnsweredChoiceQuestion("");
+        try { if (choiceStorageKey) sessionStorage.removeItem(`${choiceStorageKey}:q`); } catch { /* ignore */ }
         setSelection(undefined);
         setAttachments([]);
         setAttachmentError("");
@@ -1273,7 +1307,7 @@ export function ChatWorkspace({
                                         <small>Designer</small>
                                     </div>
                                     <MarkdownRenderer
-                                        content={item.assistant_message}
+                                        content={stripAgentChoicesTag(item.assistant_message)}
                                     />
                                 </div>
                             </article>
@@ -1383,7 +1417,7 @@ export function ChatWorkspace({
                             <AssistantAvatar />
                             <div className="assistant-body">
                                 <div className="assistant-header"><small>Designer</small></div>
-                                <MarkdownRenderer content={eventText(event)} />
+                                <MarkdownRenderer content={stripAgentChoicesTag(eventText(event))} />
                             </div>
                         </article>
                     ),
@@ -1415,7 +1449,7 @@ export function ChatWorkspace({
                                         <small>
                                             {event.type.replaceAll(".", " · ")}
                                         </small>
-                                        <p>{eventText(event)}</p>
+                                        <p>{stripAgentChoicesTag(eventText(event))}</p>
                                     </div>
                                 </div>
                             ))}
@@ -1435,7 +1469,7 @@ export function ChatWorkspace({
                                     <small>Designer</small>
                                 </div>
                                 <MarkdownRenderer
-                                    content={run.assistant_message}
+                                    content={stripAgentChoicesTag(run.assistant_message)}
                                 />
                             </div>
                         </article>
@@ -1481,7 +1515,7 @@ export function ChatWorkspace({
                                 <small>Designer</small>
                             </div>
                             <MarkdownRenderer
-                                content={`${run.assistant_message}\n\nĐã hoàn tất tạo các màn hình. Mở trang thiết kế để kiểm tra, sau đó chọn Approve Design để hoàn tất.`}
+                                content={`${stripAgentChoicesTag(run.assistant_message)}\n\nĐã hoàn tất tạo các màn hình. Mở trang thiết kế để kiểm tra, sau đó chọn Approve Design để hoàn tất.`}
                             />
                         </div>
                     </article>
@@ -1740,6 +1774,42 @@ export function ChatWorkspace({
             </section>
 
             <div className="composer-wrapper">
+                {(() => {
+                    if (isAgentWorking || reviewRun) return null;
+                    const eventMsgs = conversationEvents.filter(
+                        (e) => e.type === "assistant.message" && typeof e.payload?.text === "string",
+                    );
+                    const lastEventText = eventMsgs.length
+                        ? String(eventMsgs[eventMsgs.length - 1].payload.text)
+                        : "";
+                    const latestText =
+                        run?.assistant_message ||
+                        lastEventText ||
+                        [...runs].reverse().find((r) => Boolean(r.assistant_message))?.assistant_message ||
+                        "";
+                    const choicePrompt = extractAgentChoices(latestText);
+                    if (!choicePrompt) return null;
+                    const choiceKey = `${sessionId || "s"}:${run?.id || "r"}:${latestText.slice(0, 64)}`;
+                    if (dismissedChoiceKey === choiceKey || lastAnsweredChoiceQuestion === choicePrompt.question) return null;
+                    return (
+                        <AgentChoiceCard
+                            prompt={choicePrompt}
+                            disabled={busy}
+                            onDismiss={() => markChoiceHandled(choiceKey, choicePrompt.question)}
+                            onSubmit={(answer) => {
+                                markChoiceHandled(choiceKey, choicePrompt.question);
+                                onSubmit({
+                                    prompt: answer,
+                                    screenName: screenName.trim() || "Screen",
+                                    platform,
+                                    styleName,
+                                    libraryIds: [],
+                                    assets: [],
+                                });
+                            }}
+                        />
+                    );
+                })()}
                 <section
                     className={`composer ${dragging ? "is-dragging" : ""}`}
                     aria-label="Create design request"
@@ -1998,8 +2068,8 @@ export function ChatWorkspace({
                                             <div className="huly-proposal-list">
                                                 {hulyProposal.proposal.tasks.map((task) => <article key={task.key} className={`huly-proposal-card${selectedProposalKeys.includes(task.key) ? " is-selected" : ""}`}>
                                                     <label className="huly-proposal-check"><input type="checkbox" checked={selectedProposalKeys.includes(task.key)} onChange={(event) => toggleProposalTask(task.key, event.target.checked)} aria-label={`Chọn ${task.title}`} /></label>
-                                                    <button type="button" className="huly-proposal-card-main" onClick={() => { setSelectedProposalKey(task.key); setHulyDialogStage("detail"); }}>
-                                                        <span className="huly-proposal-card-top"><strong>{task.title || "Chưa có tên task"}</strong><small className={`huly-priority is-${task.priority}`}>{proposalPriorityLabel[task.priority]}</small></span>
+                                                    <button type="button" className="huly-proposal-card-main" onClick={() => { setSelectedProposalKey(task.key); setEditingProposalDetail(false); setHulyDialogStage("detail"); }}>
+                                                        <span className="huly-proposal-card-top"><strong>{task.title || "Chưa có tên task"}</strong>{task.task_kind && <small className="huly-role-badge">{proposalTaskKindLabel[task.task_kind] ?? task.task_kind}</small>}<small className={`huly-priority is-${task.priority}`}>{proposalPriorityLabel[task.priority]}</small></span>
                                                         <span className="huly-outcome-label">Kết quả công việc</span><span className="huly-proposal-outcome">{task.outcome}</span>
                                                         <span className="huly-proposal-meta">{task.dependency_keys.length ? `${task.dependency_keys.length} phụ thuộc` : "Chưa có phụ thuộc"} <i /> {task.source_refs.length} nguồn <em>Xem chi tiết →</em></span>
                                                     </button>
@@ -2019,19 +2089,63 @@ export function ChatWorkspace({
                             </div>}
                             {hulyDialogStage === "detail" && selectedProposedTask && <div className="huly-stage-content">
                                 <button className="huly-back-proposal" type="button" onClick={() => setHulyDialogStage("proposal")}>← Quay lại danh sách task</button>
-                                <div className="huly-stage-heading"><div><h3>{selectedProposedTask.title || "Chưa có tên task"}</h3></div><span>Task {Math.max(1, hulyProposal?.proposal.tasks.findIndex((task) => task.key === selectedProposedTask.key) ?? 0) + 1} / {hulyProposal?.proposal.tasks.length ?? 0}</span></div>
+                                <div className="huly-stage-heading"><div>{selectedProposedTask.task_kind && <span className="huly-role-badge">{proposalTaskKindLabel[selectedProposedTask.task_kind] ?? selectedProposedTask.task_kind}</span>}<h3>{selectedProposedTask.title || "Chưa có tên task"}</h3></div><span>Task {Math.max(1, hulyProposal?.proposal.tasks.findIndex((task) => task.key === selectedProposedTask.key) ?? 0) + 1} / {hulyProposal?.proposal.tasks.length ?? 0}</span></div>
                                 <div className="huly-detail-grid">
                                     <section className="huly-proposal-editor">
-                                        <div className="huly-section-label">NỘI DUNG TASK</div>
-                                        <label className="huly-field"><span>Tên task</span><input value={selectedProposedTask.title} maxLength={240} placeholder="Tên đầu ra nghiệp vụ cần bàn giao" onChange={(event) => updateProposedTask(selectedProposedTask.key, { title: event.target.value })} /></label>
-                                        <label className="huly-field"><span>Kết quả cần đạt</span><textarea rows={3} value={selectedProposedTask.outcome} onChange={(event) => updateProposedTask(selectedProposedTask.key, { outcome: event.target.value })} /></label>
-                                        <label className="huly-field"><span>Hiện trạng <small>Tùy chọn · chỉ ghi khi có căn cứ</small></span><textarea rows={3} value={selectedProposedTask.current_state ?? ""} onChange={(event) => updateProposedTask(selectedProposedTask.key, { current_state: event.target.value })} placeholder="Chưa có thông tin hiện trạng từ nguồn. Bổ sung nếu task thay đổi chức năng đang tồn tại." /></label>
-                                        <label className="huly-field"><span>Giải pháp / hành vi cần thực hiện</span><textarea rows={4} value={selectedProposedTask.solution ?? ""} onChange={(event) => updateProposedTask(selectedProposedTask.key, { solution: event.target.value })} /></label>
-                                        <div className="huly-proposal-edit-grid">
-                                            <label className="huly-field"><span>Phạm vi triển khai</span><textarea rows={5} value={selectedProposedTask.scope_in.join("\n")} onChange={(event) => updateProposedTask(selectedProposedTask.key, { scope_in: event.target.value.split("\n").map((value) => value.trim()).filter(Boolean) })} /></label>
-                                            <label className="huly-field"><span>Ngoài phạm vi</span><textarea rows={5} value={selectedProposedTask.scope_out.join("\n")} onChange={(event) => updateProposedTask(selectedProposedTask.key, { scope_out: event.target.value.split("\n").map((value) => value.trim()).filter(Boolean) })} /></label>
-                                            <label className="huly-field huly-criteria-field"><span>Tiêu chí nghiệm thu</span><textarea rows={6} value={selectedProposedTask.acceptance_criteria.join("\n")} onChange={(event) => updateProposedTask(selectedProposedTask.key, { acceptance_criteria: event.target.value.split("\n").map((value) => value.trim()).filter(Boolean) })} /></label>
+                                        <div className="huly-section-head">
+                                            <div className="huly-section-label">NỘI DUNG TASK</div>
+                                            <button type="button" className="huly-edit-toggle" onClick={() => setEditingProposalDetail((v) => !v)}>
+                                                {editingProposalDetail ? "Xem dạng danh sách" : "Chỉnh sửa nội dung"}
+                                            </button>
                                         </div>
+                                        {editingProposalDetail ? <>
+                                            <label className="huly-field"><span>Tên task</span><input value={selectedProposedTask.title} maxLength={240} placeholder="Tên đầu ra nghiệp vụ cần bàn giao" onChange={(event) => updateProposedTask(selectedProposedTask.key, { title: event.target.value })} /></label>
+                                            <label className="huly-field"><span>Kết quả cần đạt</span><textarea rows={3} value={selectedProposedTask.outcome} onChange={(event) => updateProposedTask(selectedProposedTask.key, { outcome: event.target.value })} /></label>
+                                            <label className="huly-field"><span>Hiện trạng <small>Tùy chọn · chỉ ghi khi có căn cứ</small></span><textarea rows={3} value={selectedProposedTask.current_state ?? ""} onChange={(event) => updateProposedTask(selectedProposedTask.key, { current_state: event.target.value })} placeholder="Chưa có thông tin hiện trạng từ nguồn. Bổ sung nếu task thay đổi chức năng đang tồn tại." /></label>
+                                            <label className="huly-field"><span>Giải pháp / hành vi cần thực hiện</span><textarea rows={3} value={selectedProposedTask.solution ?? ""} onChange={(event) => updateProposedTask(selectedProposedTask.key, { solution: event.target.value })} /></label>
+                                            <div className="huly-proposal-edit-grid">
+                                                <label className="huly-field"><span>Phạm vi triển khai</span><textarea rows={5} value={selectedProposedTask.scope_in.join("\n")} onChange={(event) => updateProposedTask(selectedProposedTask.key, { scope_in: event.target.value.split("\n").map((value) => value.trim()).filter(Boolean) })} /></label>
+                                                <label className="huly-field"><span>Ngoài phạm vi</span><textarea rows={5} value={selectedProposedTask.scope_out.join("\n")} onChange={(event) => updateProposedTask(selectedProposedTask.key, { scope_out: event.target.value.split("\n").map((value) => value.trim()).filter(Boolean) })} /></label>
+                                                <label className="huly-field huly-criteria-field"><span>Tiêu chí nghiệm thu</span><textarea rows={6} value={selectedProposedTask.acceptance_criteria.join("\n")} onChange={(event) => updateProposedTask(selectedProposedTask.key, { acceptance_criteria: event.target.value.split("\n").map((value) => value.trim()).filter(Boolean) })} /></label>
+                                            </div>
+                                        </> : <>
+                                            <div className="huly-readonly-block">
+                                                <span className="huly-readonly-label">Kết quả cần đạt</span>
+                                                <p>{selectedProposedTask.outcome}</p>
+                                            </div>
+                                            {selectedProposedTask.current_state?.trim() && (
+                                                <div className="huly-readonly-block">
+                                                    <span className="huly-readonly-label">Hiện trạng</span>
+                                                    <p>{selectedProposedTask.current_state}</p>
+                                                </div>
+                                            )}
+                                            {selectedProposedTask.solution?.trim() && (
+                                                <div className="huly-readonly-block">
+                                                    <span className="huly-readonly-label">Giải pháp</span>
+                                                    <p>{selectedProposedTask.solution}</p>
+                                                </div>
+                                            )}
+                                            <div className="huly-readonly-block">
+                                                <span className="huly-readonly-label">Phạm vi triển khai</span>
+                                                <ul className="huly-bullet-list">
+                                                    {selectedProposedTask.scope_in.map((item, idx) => <li key={`in-${idx}`}>{renderBulletText(item)}</li>)}
+                                                </ul>
+                                            </div>
+                                            {selectedProposedTask.scope_out.length > 0 && (
+                                                <div className="huly-readonly-block">
+                                                    <span className="huly-readonly-label">Ngoài phạm vi</span>
+                                                    <ul className="huly-bullet-list">
+                                                        {selectedProposedTask.scope_out.map((item, idx) => <li key={`out-${idx}`}>{renderBulletText(item)}</li>)}
+                                                    </ul>
+                                                </div>
+                                            )}
+                                            <div className="huly-readonly-block">
+                                                <span className="huly-readonly-label">Tiêu chí nghiệm thu</span>
+                                                <ul className="huly-bullet-list">
+                                                    {selectedProposedTask.acceptance_criteria.map((item, idx) => <li key={`ac-${idx}`}>{renderBulletText(item)}</li>)}
+                                                </ul>
+                                            </div>
+                                        </>}
                                     </section>
                                     <aside className="huly-detail-aside">
                                         <section className="huly-proposal-rationale-panel"><span className="huly-section-label">LÝ DO ƯU TIÊN</span><strong className={`huly-priority is-${selectedProposedTask.priority}`}>{proposalPriorityLabel[selectedProposedTask.priority]}</strong><textarea rows={3} value={selectedProposedTask.priority_rationale ?? ""} onChange={(event) => updateProposedTask(selectedProposedTask.key, { priority_rationale: event.target.value })} placeholder="Nêu tác động hoặc phụ thuộc từ nguồn; để trống nếu chưa đủ căn cứ." /></section>
